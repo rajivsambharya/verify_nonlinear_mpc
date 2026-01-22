@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "verify_scp"
+description="A package verifying layered control architectures."
+readme = "README.md"
+license = {text = "Apache 2.0"}
+dynamic = ["version"]
+authors = [
+{name = "Rajiv Sambharya", email="sambhar9@seas.upenn.edu"},
+{name = "Nikolai Matni", email="nmatni@seas.upenn.edu"},
+{name = "George Pappas", email="pappasg@seas.upenn.edu"}
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "cvxpy>=1.3.0",
+    "matplotlib",
+    "hydra-core", 
+    "mosek",
+    "gurobipy"
+]
+
+[tool.setuptools.packages.find]
+include = ["verify_layers*", "benchmarks*"]
+exclude = ["tutorials*", "tests*"]
+
+[tool.setuptools_scm]
+# To infer version automatically from git
+write_to = "verify_layers/_version.py"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "ruff-lsp", "black", "pandas", "jupyterlab"]
+
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.ruff]
+select = ["E", "F", "I"]
+ignore = ["E722"]
+line-length = 100
+exclude = ["build", "examples", "instances", "docs", "*__init__.py"]
+target-version = "py312"
