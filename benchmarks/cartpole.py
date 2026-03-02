@@ -1,232 +1,90 @@
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
-import scipy.sparse as sp
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-cmap = plt.cm.Set1
-colors = cmap.colors
 import cvxpy as cp
 from scipy import sparse
-# Solve MPC QP with linearized dynamics
 from scipy.optimize import minimize
+from scipy.linalg import expm
 
+cmap = plt.cm.Set1
+colors = cmap.colors
 
-
-FONT_SIZE = 44 #33 #36 # 38
+FONT_SIZE = 33
 plt.rcParams.update({
     "text.usetex": True,
-    "font.family": "serif",   # For talks, use sans-serif
+    "font.family": "serif",
     "axes.labelsize": FONT_SIZE,
     "axes.titlesize": FONT_SIZE
 })
-# Optional: give ticks their own family
 plt.rc("xtick", labelsize=FONT_SIZE, labelcolor="black")
 plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
 
 
 def run(cfg):
     K = cfg.K
-    
-    inits = ['warm_start'] #, 'cold_start']
-    all_opt_vals = []
-    all_sols = []
-    all_times = []
-    all_sample_maxes = []
     x_mins = cfg.x_mins
     x_maxes = cfg.x_maxes
 
     T = 5
-    # K_sim = cfg.K
-    r = 0 #0.00001 #0.1
+    r = 0
     dt = 0.1
-    mass = 1
-    length = 1
 
     x_min = x_mins[0]
     x_max = x_maxes[0]
     rho_max = cfg.rho_max
 
-    for j in range(len(x_mins)):
-        
-        curr_init_opt_vals = []
-        curr_init_sols = []
-        curr_init_times = []
-        curr_sample_maxes = []
-        for i in range(len(inits)):
-            sols = []
-            times = np.zeros(K)
-            opt_vals = np.zeros(K)
-            warm_start_x = None
-            warm_start_bd = None
-            for k in range(K):
-                
-                ver = CartpoleVerify(n=cfg.n, K=k+1, T=T, r=r, dt=dt, mass=1, length=1, g=9.8, rho=cfg.rho, x_lo=x_min, x_hi=x_max, seed=42, verbose=True)
+    sols = []
+    times = np.zeros(K)
+    opt_vals = np.zeros(K)
 
-                status, time = ver.solve()
-                print("solve() status:", status)
-                sol = ver.solution_dict()
-                print("Objective:", sol["obj"])
+    for k in range(K):
+        rho_lo = 0.0
+        rho_hi = rho_max
+        best_rho = None
+        best_sol = None
+        best_time = None
 
-                x0_init = np.array([sol['x'][0][0], sol['x'][0][1]])
-                sim_out = simulate_layered_controller(x0_init, k+1, T=T, r=r, dt=dt, mass=1, length=1, g=9.8)
-                import pdb
-                pdb.set_trace()
+        while rho_hi - rho_lo > 1e-2:
+            rho_mid = (rho_lo + rho_hi) / 2.0
 
-                opt_vals[j] = sol["obj"]
-                sols.append(sol)
-                times[j] = time
+            ver = CartpoleVerify(
+                n=cfg.n, K=k+1, T=T, r=r, dt=dt,
+                mass=1, length=1, g=9.8, rho=rho_mid,
+                x_lo=x_min, x_hi=x_max, seed=42, verbose=True
+            )
 
-            curr_init_opt_vals.append(opt_vals)
-            curr_init_sols.append(sols)
-            curr_init_times.append(times)
+            status, time = ver.solve()
 
-            sample_maxes = find_sample_maxes(K, cfg.num_samples, ver.P, ver.H, ver.z0, x_min, x_max, cfg.rho)
-            curr_sample_maxes.append(sample_maxes)
+            print(f"k={k+1}, rho={rho_mid:.6f}, status:", status)
+            sol = ver.solution_dict()
+            print("Objective:", sol["obj"])
 
-        all_opt_vals.append(curr_init_opt_vals)
-        all_sols.append(curr_init_sols)
-        all_times.append(curr_init_times)
-        all_sample_maxes.append(curr_sample_maxes)
+            if status == GRB.OPTIMAL:
+                rho_lo = rho_mid
+            else:
+                rho_hi = rho_mid
+                best_rho = rho_mid
+                best_sol = sol
+                best_time = time
 
-    ################################ journal figure
-    FONT_SIZE = 42 #33 #36 # 38
-    plt.rcParams.update({
-        "text.usetex": True,
-        "font.family": "serif",   # For talks, use sans-serif
-        "axes.labelsize": FONT_SIZE,
-        "axes.titlesize": FONT_SIZE
-    })
-    # Optional: give ticks their own family
-    plt.rc("xtick", labelsize=FONT_SIZE, labelcolor="black")
-    plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
+        if best_sol is not None:
+            print(f"Best verified rho for k={k+1}: {best_rho:.6f}")
+            opt_vals[k] = rho_hi
+            sols.append(best_sol)
+            times[k] = best_time
+        else:
+            print(f"Could not verify any rho <= {rho_max} for k={k+1}")
+            opt_vals[k] = np.inf
+            sols.append(None)
+            times[k] = 0
 
-    # First subplot (linear scale)
-    axes[0].plot(np.arange(K), all_opt_vals[0][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_opt_vals[0][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_sample_maxes[0][0], color=colors[0], linestyle=':', marker='s', markerfacecolor='none', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_sample_maxes[0][1], color=colors[1], linestyle=':', marker='o', markerfacecolor='none', markevery=(0, 1))
-    axes[0].set_xlabel('iterations')
-    axes[0].set_ylabel('worst-case suboptimality')
-    axes[0].grid(True)
-    axes[0].set_title(r'parameter set $\mathcal{X}_1=[2,4]^d$')
-    
-    axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Force at least 3 ticks
-    axes[0].yaxis.set_major_locator(MaxNLocator(nbins='auto', min_n_ticks=3))
-
-    # Second subplot (log scale)
-    axes[1].plot(np.arange(K), all_opt_vals[1][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_opt_vals[1][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_sample_maxes[1][0], color=colors[0], linestyle=':', marker='s', markerfacecolor='none', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_sample_maxes[1][1], color=colors[1], linestyle=':', marker='o', markerfacecolor='none', markevery=(0, 1))
-    axes[1].set_xlabel('iterations')
-    axes[1].grid(True)
-    axes[1].set_yscale('log')
-    axes[1].set_title(r'parameter set $\mathcal{X}_2=[5,8]^d$')
-
+    plt.plot(np.arange(K) + 1, opt_vals)
+    plt.xlabel('iterations')
+    plt.ylabel('rate')
+    plt.grid(True)
     plt.tight_layout()
-    plt.savefig('suboptimality_journal.pdf', bbox_inches='tight')
-    plt.clf()
-
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
-
-    # First subplot (linear scale)
-    axes[0].plot(np.arange(K), all_times[0][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_times[0][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[0].set_xlabel('iterations')
-    axes[0].set_ylabel('solve time (seconds)')
-    axes[0].grid(True)
-    axes[0].set_title(r'parameter set $\mathcal{X}_1$')
-    
-    axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Second subplot (log scale)
-    axes[1].plot(np.arange(K), all_times[1][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_times[1][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[1].set_xlabel('iterations')
-    axes[1].grid(True)
-    axes[1].set_yscale('log')
-    axes[1].set_title(r'parameter set $\mathcal{X}_2$')
-
-    plt.tight_layout()
-    plt.savefig('times_journal.pdf')
-
-
-    ################################ preprint figure
-    FONT_SIZE = 33 #36 # 38
-    plt.rcParams.update({
-        "text.usetex": True,
-        "font.family": "serif",   # For talks, use sans-serif
-        "axes.labelsize": FONT_SIZE,
-        "axes.titlesize": FONT_SIZE
-    })
-    # Optional: give ticks their own family
-    plt.rc("xtick", labelsize=FONT_SIZE, labelcolor="black")
-    plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
-
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
-    # fig, axes = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
-
-    # First subplot (linear scale)
-    axes[0].plot(np.arange(K), all_opt_vals[0][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_opt_vals[0][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_sample_maxes[0][0], color=colors[0], linestyle=':', marker='s', markerfacecolor='none', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_sample_maxes[0][1], color=colors[1], linestyle=':', marker='o', markerfacecolor='none', markevery=(0, 1))
-    axes[0].set_xlabel('iterations')
-    axes[0].set_ylabel('worst-case suboptimality')
-    axes[0].grid(True)
-    axes[0].set_title(r'parameter set $\mathcal{X}_1=[2,4]^d$')
-    
-    axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Force at least 3 ticks
-    # axes[0].yaxis.set_major_locator(MaxNLocator(nbins='auto', min_n_ticks=3))
-
-    # Second subplot (log scale)
-    axes[1].plot(np.arange(K), all_opt_vals[1][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_opt_vals[1][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_sample_maxes[1][0], color=colors[0], linestyle=':', marker='s', markerfacecolor='none', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_sample_maxes[1][1], color=colors[1], linestyle=':', marker='o', markerfacecolor='none', markevery=(0, 1))
-    axes[1].set_xlabel('iterations')
-    axes[1].grid(True)
-    axes[1].set_yscale('log')
-    axes[1].set_title(r'parameter set $\mathcal{X}_2=[5,8]^d$')
-
-    plt.tight_layout()
-    plt.savefig('suboptimality_preprint.pdf', bbox_inches='tight')
-    plt.clf()
-
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
-
-    # First subplot (linear scale)
-    axes[0].plot(np.arange(K), all_times[0][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[0].plot(np.arange(K), all_times[0][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[0].set_xlabel('iterations')
-    axes[0].set_ylabel('solve time (seconds)')
-    axes[0].grid(True)
-    axes[0].set_title(r'parameter set $\mathcal{X}_1$')
-    
-    axes[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axes[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Second subplot (log scale)
-    axes[1].plot(np.arange(K), all_times[1][0], color=colors[0], marker='s', markevery=(0, 1))
-    axes[1].plot(np.arange(K), all_times[1][1], color=colors[1], marker='o', markevery=(0, 1))
-    axes[1].set_xlabel('iterations')
-    axes[1].grid(True)
-    axes[1].set_yscale('log')
-    axes[1].set_title(r'parameter set $\mathcal{X}_2$')
-
-    plt.tight_layout()
-    plt.savefig('times_preprint.pdf')
-
-
+    plt.savefig('rates.pdf', bbox_inches='tight')
 
 
 class CartpoleVerify:
@@ -235,17 +93,10 @@ class CartpoleVerify:
         self.verbose = bool(verbose)
         rng = np.random.default_rng(seed)
 
-        # generate problem data
-        # g = 9.8
-        # length = 1
-        # dt = 0.1
-        # mass = 1
         n_x = 2
         n_u = 1
         Q = np.eye(n_x)
-        # R = np.eye(n_u) * .01
-        R = np.eye(n_u) * r #.1
-        # T = 5
+        R = np.eye(n_u) * r
         u_max = 10
 
         theta_0 = 0
@@ -396,54 +247,17 @@ class CartpoleVerify:
 
 
         # Worst-case objective
-        V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x)) #+ R[0,0] * self.u_lower[0] * self.u_lower[0]
-        V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x)) #+ R[0,0] * self.u_lower[0] * self.u_lower[0]
-        # self.orig_objective = V_next - V_curr + (-.1) * V_curr
-        self.orig_objective = V_next - V_curr + rho * V_curr
-
-        # M.addConstr(V_curr >= 1e-4)
-        # self.orig_objective = - + gp.quicksum(self.x1[i] * self.x1[i] for i in range(n_x))
-        # self.orig_objective = gp.quicksum((self.x1[i]  - self.x_ref1[i]) * (self.x1[i] - self.x_ref1[i]) for i in range(n_x))
-
-
-        # if warm_start_bd is not None:
-        #     M.addConstr(self.orig_objective <= warm_start_bd)
+        V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
+        V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
+        eps = 1 - rho
+        self.orig_objective = 0
+        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="V_curr_pos")
         M.setObjective(self.orig_objective, GRB.MAXIMIZE)
-
-        # Cache flat var list for OBBT convenience
-        self.all_vars = []
-        # for coll in (self.x, *self.u, *self.u0, *self.c, *self.b, *self.s, *self.mu):
-        #     self.all_vars += list(coll.values())
-        # for coll in (self.x0, *self.u, *self.b, *self.s, *self.mu):
-        #     self.all_vars += list(coll.values())
 
     def solve(self):
         self.model.setObjective(self.orig_objective, GRB.MAXIMIZE)
         self.model.optimize()
         return self.model.Status, self.model.Runtime
-
-    # def solution_dict(self):
-    #     def v2dict(vs): return {k: vs[k].X for k in vs}
-    #     out = {
-    #         "obj": None if self.model.SolCount == 0 else self.model.ObjVal,
-    #         "x0":   None if self.model.SolCount == 0 else v2dict(self.x[0]),
-    #         "x1":   None if self.model.SolCount == 0 else v2dict(self.x[1]),
-    #         "x2":   None if self.model.SolCount == 0 else v2dict(self.x[2]),
-    #         "x_fin":   None if self.model.SolCount == 0 else v2dict(self.x[self.K]),
-    #         "x_ref1":   None if self.model.SolCount == 0 else v2dict(self.x_ref[1]),
-    #         "u_lower0":   None if self.model.SolCount == 0 else v2dict(self.u_lower[0]),
-    #         "u_mpc0":   None if self.model.SolCount == 0 else v2dict(self.u_mpc[0]),
-    #         # # "cos_theta":  None if self.model.SolCount == 0 else v2dict(self.cos_theta),
-    #         # "cos_theta":  None if self.model.SolCount == 0 else self.cos_theta.X,
-    #         # "sin_theta":  None if self.model.SolCount == 0 else self.sin_theta.X,
-    #         # "x_ref1":   None if self.model.SolCount == 0 else v2dict(self.x_ref1),
-    #         # "u":  None if self.model.SolCount == 0 else v2dict(self.u),
-    #         # "s":  None if self.model.SolCount == 0 else v2dict(self.s),
-    #         # "mu":  None if self.model.SolCount == 0 else v2dict(self.mu),
-    #         # "b":  None if self.model.SolCount == 0 else v2dict(self.b),
-    #         # "u_lower":  None if self.model.SolCount == 0 else v2dict(self.u_lower),
-    #     }
-    #     return out
 
     def solution_dict(self):
         def v2dict(vs): return {k: vs[k].X for k in vs}
@@ -635,8 +449,7 @@ def simulate_layered_controller(x0_init, K_sim, T=5, r=0.1, dt=0.1, mass=1, leng
             gradient = B_lin[:, 0] @ Q @ pred_error + R[0, 0] * u_lower_val
             
             return gradient ** 2  # Minimize squared residual
-        
-        # from scipy.optimize import minimize
+
         result = minimize(lqr_cost, [0.0], method='BFGS', tol=1e-12)
         u_lower_k = result.x[0]
         u_lower_traj[k] = u_lower_k
@@ -660,179 +473,6 @@ def simulate_layered_controller(x0_init, K_sim, T=5, r=0.1, dt=0.1, mass=1, leng
         "A_lin": A_lin_traj,
     }
 
-
-
-
-
-
-
-        # theta_ddot_passive = g / length * np.sin(x_k[0])
-        # residual = x_k[1] + dt * theta_ddot_passive - x_ref_k1[1]
-        
-        # # Coefficient of u_lower
-        # coeff = Q[1, 1] * B_lin[1, 0] + R[0, 0]
-        
-        # # Solve for u_lower
-        # u_lower_k = -Q[1, 1] * residual / coeff
-        # u_lower_traj[k] = u_lower_k
-        
-        # # === TRUE DYNAMICS: Propagate state ===
-        # theta_k1 = x_k[0] + dt * x_k[1]
-        # theta_ddot = g / length * np.sin(x_k[0]) + u_lower_k / (mass * length ** 2)
-        # theta_dot_k1 = x_k[1] + dt * theta_ddot
-        # x_traj[k + 1] = np.array([theta_k1, theta_dot_k1])
-        
-        # # Compute prediction error
-        # pred_error_traj[k] = x_traj[k + 1] - x_ref_traj[k + 1]
-    
-    return {
-        "x": x_traj,
-        "u_lower": u_lower_traj,
-        "x_ref": x_ref_traj,
-        "u_mpc": u_mpc_traj,
-        "pred_error": pred_error_traj,
-        "A_lin": A_lin_traj,
-    }
-    
-
-def simulate_layered_controller_old(x0_init, K_sim, dt=0.01, mass=1, length=1, g=9.8):
-    """
-    Simulate the layered controller starting from x0_init for K_sim timesteps.
-    
-    Args:
-        x0_init: Initial state [theta, theta_dot]
-        K_sim: Number of simulation steps (defaults to self.K)
-        dt, mass, length, g: Dynamics parameters
-    
-    Returns:
-        Dictionary with state/control/reference trajectories
-    """
-
-    
-    # Get MPC problem data (assuming it's already set up)
-    Q = np.eye(2)
-    R = np.eye(1) * 0.1
-    T = 5
-    u_max = 1
-    
-    # Storage for trajectories
-    x_traj = np.zeros((K_sim + 1, 2))
-    u_lower_traj = np.zeros((K_sim, 1))
-    x_ref_traj = np.zeros((K_sim + 1, 2))
-    u_mpc_traj = []
-    pred_error_traj = np.zeros((K_sim, 2))
-    
-    x_traj[0] = x0_init
-    
-    # B matrix for linearized dynamics (constant)
-    B_lin = np.zeros((2, 1))
-    B_lin[0, 0] = 0
-    B_lin[1, 0] = dt / (mass * length ** 2)
-    
-    for k in range(K_sim):
-        x_k = x_traj[k]
-        
-        # === UPPER LAYER: MPC with linearized dynamics ===
-        # Linearize dynamics around current state
-        theta_k = x_k[0]
-        A_lin = np.array([
-            [1, dt],
-            [dt * g / length * np.cos(theta_k), 1]
-        ])
-        
-        # Build and solve MPC problem
-        n_x = 2
-        n_u = 1
-        
-        # Decision variables: [x_0, u_0, x_1, u_1, ..., x_T]
-        n_vars = (T + 1) * n_x + T * n_u
-        
-        # For simplicity, use cvxpy to solve the MPC QP
-        x_mpc = cp.Variable((T + 1, n_x))
-        u_mpc = cp.Variable((T, n_u))
-        
-        # Cost: sum_t (x_t^T Q x_t + u_t^T R u_t)
-        cost = 0
-        for t in range(T):
-            cost += .5 * cp.quad_form(x_mpc[t], Q) + .5 * cp.quad_form(u_mpc[t], R)
-        cost += .5 * cp.quad_form(x_mpc[T], Q)  # Terminal cost
-        
-        # Constraints
-        constraints = [
-            x_mpc[0] == x_k  # Initial condition
-        ]
-        
-        for t in range(T):
-            # Linearized dynamics: x_{t+1} = A_lin @ x_t + B_lin @ u_t
-            constraints.append(x_mpc[t + 1] == A_lin @ x_mpc[t] + B_lin @ u_mpc[t])
-            # Control bounds
-            constraints.append(u_mpc[t] <= u_max)
-            constraints.append(u_mpc[t] >= -u_max)
-        
-        # Solve
-        problem = cp.Problem(cp.Minimize(cost), constraints)
-        problem.solve(solver=cp.CLARABEL, verbose=False)
-        
-        if problem.status not in ['optimal', 'optimal_inaccurate']:
-            print(f"MPC failed at step {k}: {problem.status}")
-            break
-        
-        # Extract reference for next timestep
-        x_ref_k1 = x_mpc.value[1]  # Second state in the trajectory
-        x_ref_traj[k + 1] = x_ref_k1
-        u_mpc_traj.append(u_mpc.value)
-        
-        # === LOWER LAYER: LQR tracking controller ===
-        # The lower layer uses true nonlinear dynamics and tries to track x_ref_k1
-        
-        # We need to solve: min_{u_lower} ||x_{k+1} - x_ref_{k+1}||_Q^2 + ||u_lower||_R^2
-        # where x_{k+1} = f_true(x_k, u_lower)
-        
-        # For the inverted pendulum:
-        # theta_{k+1} = theta_k + dt * theta_dot_k
-        # theta_dot_{k+1} = theta_dot_k + dt * (g/L * sin(theta_k) + u_lower / (m*L^2))
-        
-        # This is a simple 1D optimization problem
-        def lower_cost(u_lower):
-            u_lower = u_lower[0]
-            # True dynamics
-            theta_k1 = x_k[0] + dt * x_k[1]
-            theta_ddot = g / length * np.sin(x_k[0]) + u_lower / (mass * length ** 2)
-            theta_dot_k1 = x_k[1] + dt * theta_ddot
-            x_k1_true = np.array([theta_k1, theta_dot_k1])
-            
-            # Tracking error
-            error = x_k1_true - x_ref_k1
-            
-            # Cost
-            return error.T @ Q @ error + u_lower ** 2 * R[0, 0]
-        
-        # Optimize
-        result = minimize(lower_cost, [0.0], method='BFGS')
-        u_lower_k = result.x[0]
-        u_lower_traj[k] = u_lower_k
-        
-        # === TRUE DYNAMICS: Propagate state ===
-        theta_k1 = x_k[0] + dt * x_k[1]
-        theta_ddot = g / length * np.sin(x_k[0]) + u_lower_k / (mass * length ** 2)
-        theta_dot_k1 = x_k[1] + dt * theta_ddot
-        x_traj[k + 1] = np.array([theta_k1, theta_dot_k1])
-        
-        # Compute prediction error
-        pred_error_traj[k] = x_traj[k + 1] - x_ref_traj[k + 1]
-    
-    return {
-        "x": x_traj,
-        "u_lower": u_lower_traj,
-        "x_ref": x_ref_traj,
-        "u_mpc": u_mpc_traj,
-        "pred_error": pred_error_traj,
-    }
-
-# def encode_dyn(x1, x0, u):
-#     x1[0] == x0[0] + dt * x0[1]
-#     theta_ddot = g / L * np.sin(theta) + u / (m * L**2)
-#     x1[1] == x0[1] + dt * theta_ddot     
 
 def find_sample_maxes(K, num_samples, P, H, z0, x_min, x_max, rho):
     sample_maxes = np.zeros(K)
@@ -986,42 +626,6 @@ def get_dynamics_at_angle(theta_0, dt=0.05, mass=1.0, length=1.0, g=9.81):
     B_dyn = dt * B_cont
     
     return A_dyn, B_dyn
-
-
-# def get_dynamics_euler(dt=0.05, M=1.0, m=0.1, L=0.5, g=9.81):
-#     """
-#     Get discrete-time linearized cart-pole dynamics using Euler approximation.
-    
-#     This is a simpler but less accurate alternative to get_dynamics().
-#     Use for comparison or when exact discretization is not needed.
-    
-#     Parameters: same as get_dynamics()
-    
-#     Returns:
-#         A_dyn: (4, 4) discrete-time state matrix
-#         B_dyn: (4, 1) discrete-time input matrix
-#     """
-    
-#     # Continuous-time matrices
-#     A_cont = np.array([
-#         [0,  1,              0,              0],
-#         [0,  0,  -m*g/M,                     0],
-#         [0,  0,              0,              1],
-#         [0,  0,  (M+m)*g/(M*L),              0]
-#     ])
-    
-#     B_cont = np.array([
-#         [0],
-#         [1/M],
-#         [0],
-#         [-1/(M*L)]
-#     ])
-    
-#     # Euler discretization: A_d = I + dt*A_c, B_d = dt*B_c
-#     A_dyn = np.eye(4) + dt * A_cont
-#     B_dyn = dt * B_cont
-    
-#     return A_dyn, B_dyn
 
 
 def form_mpc_qp(A_dyn, B_dyn, Q, r, T, u_max):

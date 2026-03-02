@@ -1,6 +1,8 @@
 K: 15
+T: 10
+dt: .1
 n: 10
-rho: .2
+rho_max: 5
 x_mins: [-0.5, 5]
 x_maxes: [0.5, 8]
 num_samples: 10

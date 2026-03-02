@@ -3,6 +3,8 @@ import sys
 import hydra
 
 import benchmarks.cartpole as cartpole
+import benchmarks.cartpole_ilqr as cartpole_ilqr
+import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
 
 
 import matplotlib
@@ -12,6 +14,16 @@ matplotlib.use('pdf')
 @hydra.main(config_path='configs', config_name='cartpole.yaml')
 def main_run_cartpole(cfg):
     cartpole.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole.yaml')
+def main_run_cartpole_ilqr(cfg):
+    cartpole_ilqr.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='nonlinear_double_integrator.yaml')
+def main_run_nonlinear_double_integrator(cfg):
+    nonlinear_double_integrator.run(cfg)
 
 
 # @hydra.main(config_path='configs', config_name='power_converter.yaml')
@@ -61,13 +73,21 @@ if __name__ == '__main__':
         base = 'hydra.run.dir=/scratch/sambhar9/lah_robust/outputs/'
     elif sys.argv[2] == 'local':
         base = 'hydra.run.dir=outputs/'
-    if sys.argv[1] == 'cartpole':
+    if sys.argv[1] == 'nonlinear_double_integrator':
+        sys.argv[1] = base + 'nonlinear_double_integrator/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_nonlinear_double_integrator()
+    elif sys.argv[1] == 'cartpole':
         # step 1. remove the markowitz argument -- otherwise hydra uses it as an override
         # step 2. add the train_outputs/... argument for train_outputs not outputs
         # sys.argv[1] = 'hydra.run.dir=outputs/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv[1] = base + 'cartpole/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_cartpole()
+    elif sys.argv[1] == 'cartpole_ilqr':
+        sys.argv[1] = base + 'cartpole_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_ilqr()
     elif sys.argv[1] == 'sparse_coding':
         sys.argv[1] = base + 'sparse_coding/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
