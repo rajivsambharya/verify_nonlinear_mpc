@@ -1,6 +1,7 @@
-K: 15
-T: 10
+K: 7 #6 #15
+T_vals: [1, 5, 10]
 dt: .1
+time_limit: 1000
 n: 10
 rho_max: 5
 x_mins: [-0.5, 5]

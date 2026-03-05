@@ -24,7 +24,7 @@ def run(cfg):
     r = getattr(cfg, 'r', 0.1)
     u_max = getattr(cfg, 'u_max', 10.0)
 
-    T_vals = list(range(20, T_max + 1))
+    T_vals = list(range(5, T_max + 1))
     obj_vals = []
 
     for T in T_vals:
@@ -171,31 +171,6 @@ class NonlinearDoubleIntegratorVerify:
                        + alpha * xnorm2_opt[t])
                 M.addConstr(x_opt[t + 1][i] == rhs, name=f"dyno_{t}_{i}")
 
-        # ---------------------------------------------------------------
-        # KKT optimality conditions for the MPC problem
-        #
-        # Cost (with 1/2 scaling):
-        #   J = (1/2) sum_{t=0}^{T-1} (x_t^T Q x_t + u_t^T R u_t)
-        #       + (1/2) x_T^T Q x_T
-        #
-        # Hamiltonian: H_t = (1/2)(x_t^T Q x_t + u_t^T R u_t)
-        #                   + p_{t+1}^T (A x_t + B u_t + f(x_t))
-        #
-        # Costate backward recursion:
-        #   p_t = Q x_t + A^T p_{t+1} + (df/dx_t)^T p_{t+1}
-        # where f(x) = alpha*||x||^2*ones, so
-        #   (df/dx_t)^T p_{t+1} = 2*alpha*(p_{t+1}^T ones)*x_t
-        #                        = 2*alpha*(p[0]+p[1])*x_t
-        #
-        # Terminal costate: p_T = Q x_T
-        #
-        # Control stationarity (with box constraint multipliers):
-        #   R u_t + B^T p_{t+1} + nu_up - nu_lo = 0
-        #
-        # Complementarity:
-        #   nu_up * (u_max - u_t) = 0,  nu_lo * (u_max + u_t) = 0
-        # ---------------------------------------------------------------
-
         # Terminal costate
         for i in range(n_x):
             M.addConstr(
@@ -282,10 +257,7 @@ class NonlinearDoubleIntegratorVerify:
             + gp.quicksum(R_mat[j, j] * u_opt[t][j] * u_opt[t][j]
                           for t in range(T) for j in range(n_u))
         )
-        # M.addConstr(
-        #             V_kkt >= V_opt + 1e-3,
-        #         )
-        # self.orig_objective = 0
+
         self.orig_objective = V_kkt - V_opt
         M.setObjective(self.orig_objective, GRB.MAXIMIZE)
 

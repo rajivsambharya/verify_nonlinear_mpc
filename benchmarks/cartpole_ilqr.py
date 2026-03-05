@@ -22,70 +22,88 @@ def run(cfg):
     x_mins = cfg.x_mins
     x_maxes = cfg.x_maxes
 
-    T = cfg.T
-    r = 0 #0.001 #0.01  # Small positive value to avoid degenerate optimality conditions
+    T_vals_list = list(cfg.T_vals)
+    r = 0
     dt = cfg.dt
 
     x_min = x_mins[0]
     x_max = x_maxes[0]
     rho_max = cfg.rho_max
 
-    sols = []
-    times = np.zeros(K)
-    opt_vals = np.zeros(K)
+    n_T = len(T_vals_list)
+    times    = np.zeros((n_T, K))
+    opt_vals = np.zeros((n_T, K))
 
-    for k in range(K):
-        rho_lo = 0.0
-        rho_hi = rho_max
-        best_rho = None
-        best_sol = None
-        best_time = None
+    for ti, T in enumerate(T_vals_list):
+        for k in range(K):
+            rho_lo = 0.0
+            rho_hi = rho_max
+            best_rho = None
+            best_sol = None
+            total_time = 0.0
 
-        while rho_hi - rho_lo > 1e-3:
-            rho_mid = (rho_lo + rho_hi) / 2.0
+            while rho_hi - rho_lo > 1e-3:
+                rho_mid = (rho_lo + rho_hi) / 2.0
 
-            ver = CartpoleILQRVerify(
-                n=cfg.n, K=k+1, T=T, r=r, dt=dt,
-                mass=1, length=1, g=9.8, rho=rho_mid,
-                x_lo=x_min, x_hi=x_max, seed=42, verbose=True
-            )
+                ver = CartpoleILQRVerify(
+                    n=cfg.n, K=k+1, T=T, r=r, dt=dt,
+                    mass=1, length=1, g=9.8, rho=rho_mid,
+                    x_lo=x_min, x_hi=x_max, seed=42, verbose=True,
+                    time_limit=cfg.time_limit
+                )
 
-            status, time = ver.solve()
+                status, solve_time = ver.solve()
+                total_time += solve_time
 
-            print(f"k={k+1}, rho={rho_mid:.6f}, status:", status)
-            sol = ver.solution_dict()
-            print("Objective:", sol["obj"])
+                print(f"T={T}, k={k+1}, rho={rho_mid:.6f}, status:", status)
+                sol = ver.solution_dict()
+                print("Objective:", sol["obj"])
 
-            if status == GRB.OPTIMAL:
-                rho_lo = rho_mid
+                if status == GRB.TIME_LIMIT:
+                    print(f"T={T}, k={k+1}, rho={rho_mid:.6f}: time limit exceeded, cannot certify rate")
+                if status == GRB.OPTIMAL:
+                    rho_lo = rho_mid
+                else:
+                    rho_hi = rho_mid
+                    best_rho = rho_mid
+                    best_sol = sol
+
+            if best_sol is not None:
+                print(f"Best verified rho for T={T}, k={k+1}: {best_rho:.6f}")
+                opt_vals[ti, k] = rho_hi
             else:
-                rho_hi = rho_mid
-                best_rho = rho_mid
-                best_sol = sol
-                best_time = time
+                print(f"Could not verify any rho <= {rho_max} for T={T}, k={k+1}")
+                opt_vals[ti, k] = np.inf
+            times[ti, k] = total_time
 
-        if best_sol is not None:
-            print(f"Best verified rho for k={k+1}: {best_rho:.6f}")
-            opt_vals[k] = rho_hi
-            sols.append(best_sol)
-            times[k] = best_time
-        else:
-            print(f"Could not verify any rho <= {rho_max} for k={k+1}")
-            opt_vals[k] = np.inf
-            sols.append(None)
-            times[k] = 0
+    k_axis = np.arange(K) + 1
 
-    plt.plot(np.arange(K) + 1, opt_vals)
-    plt.xlabel('iterations')
-    plt.ylabel('rate')
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig('rates_ilqr.pdf', bbox_inches='tight')
+    fig_rate, ax_rate = plt.subplots(figsize=(8, 5))
+    for ti in range(n_T):
+        ax_rate.plot(k_axis, opt_vals[ti], marker='o', linewidth=2, color=colors[ti])
+    ax_rate.set_xlabel('iterations')
+    ax_rate.set_ylabel('rate')
+    ax_rate.grid(True)
+    fig_rate.tight_layout()
+    fig_rate.savefig('rates_ilqr.pdf', bbox_inches='tight')
+    plt.close(fig_rate)
+
+    fig_time, ax_time = plt.subplots(figsize=(8, 5))
+    for ti in range(n_T):
+        ax_time.plot(k_axis, times[ti], marker='o', linewidth=2, color=colors[ti])
+    ax_time.set_xlabel('iterations $k$')
+    ax_time.set_ylabel('total solve time (s)')
+    ax_time.set_yscale('log')
+    ax_time.grid(True)
+    fig_time.tight_layout()
+    fig_time.savefig('times_ilqr.pdf', bbox_inches='tight')
+    plt.close(fig_time)
 
 
 class CartpoleILQRVerify:
     def __init__(self, n=10, K=3, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
-                 rho=0.2, x_lo=0.0, x_hi=4.0, seed=None, verbose=True):
+                 rho=0.2, x_lo=0.0, x_hi=4.0, seed=None, verbose=True,
+                 time_limit=None):
         self.n, self.K, self.rho = n, K, rho
         self.verbose = bool(verbose)
         rng = np.random.default_rng(seed)
@@ -100,6 +118,8 @@ class CartpoleILQRVerify:
         M = gp.Model("cartpole_ilqr_verify")
         M.Params.OutputFlag = 1 if self.verbose else 0
         M.Params.FeasibilityTol = 1e-9
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
         self.model = M
 
         # Store state/control trajectories
