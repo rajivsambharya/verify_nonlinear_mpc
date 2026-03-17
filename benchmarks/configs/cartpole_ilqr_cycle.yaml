@@ -1,0 +1,10 @@
+K_vals: [1]
+T_vals: [6]
+dt: 0.1
+r: 0.1
+time_limit: 300
+x_mins: [-2]
+x_maxes: [2]
+u_bound: 100.0
+nontrivial_eps: 1.0e-3
+num_samples: 10

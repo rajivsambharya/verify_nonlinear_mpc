@@ -25,6 +25,7 @@ def run(cfg):
     T_vals_list = list(cfg.T_vals)
     r = cfg.r
     dt = cfg.dt
+    u_bound = cfg.u_bound
 
     x_min = x_mins[0]
     x_max = x_maxes[0]
@@ -36,9 +37,9 @@ def run(cfg):
 
     for ti, T in enumerate(T_vals_list):
         # --- Phase 1: upper bound on V_0 = J*(x_0) for this horizon T ---
-        phase1 = CartpolePhase1(
+        phase1 = CartpoleConstrainedPhase1(
             T=T, r=r, dt=dt, mass=1, length=1, g=9.8,
-            x_lo=x_min, x_hi=x_max, verbose=True,
+            x_lo=x_min, x_hi=x_max, u_bound=u_bound, verbose=True,
             time_limit=cfg.time_limit
         )
         phase1.solve()
@@ -56,10 +57,11 @@ def run(cfg):
             while rho_hi - rho_lo > cfg.tol:
                 rho_mid = (rho_lo + rho_hi) / 2.0
 
-                ver = CartpoleILQRVerify(
+                ver = CartpoleConstrainedVerify(
                     n=cfg.n, K=k+1, T=T, r=r, dt=dt,
                     mass=1, length=1, g=9.8, rho=rho_mid,
-                    x_lo=x_min, x_hi=x_max, seed=42, verbose=True,
+                    x_lo=x_min, x_hi=x_max, u_bound=u_bound,
+                    seed=42, verbose=True,
                     time_limit=cfg.time_limit, V_0_max=V_0_max
                 )
 
@@ -78,7 +80,6 @@ def run(cfg):
                     rho_hi = rho_mid
                     best_rho = rho_mid
                     best_sol = sol
-                # import pdb; pdb.set_trace()
 
             if best_sol is not None:
                 print(f"Best verified rho for T={T}, k={k+1}: {best_rho:.6f}")
@@ -98,7 +99,7 @@ def run(cfg):
     ax_rate.set_ylabel('rate')
     ax_rate.grid(True)
     fig_rate.tight_layout()
-    fig_rate.savefig('rates_ilqr.pdf', bbox_inches='tight')
+    fig_rate.savefig('rates_constrained.pdf', bbox_inches='tight')
     plt.close(fig_rate)
 
     fig_time, ax_time = plt.subplots(figsize=(8, 5))
@@ -109,33 +110,30 @@ def run(cfg):
     ax_time.set_yscale('log')
     ax_time.grid(True)
     fig_time.tight_layout()
-    fig_time.savefig('times_ilqr.pdf', bbox_inches='tight')
+    fig_time.savefig('times_constrained.pdf', bbox_inches='tight')
     plt.close(fig_time)
 
 
-class CartpolePhase1:
+class CartpoleConstrainedPhase1:
     """
     Phase 1: compute V_0_max = max_{x_0 in X_0, KKT} J*(x_0).
 
     J*(x_0) = sum_{t=0}^{T} x_t^T Q x_t + sum_{t=0}^{T-1} u_t^T R u_t
-    is the MPC value function evaluated at x_0 (optimal cost under KKT
-    conditions).  The resulting V_0_max is passed to Phase 2 as an upper
-    bound on V_curr, restricting the worst-case search to initial conditions
-    that are actually reachable under the MPC policy.
+    is the MPC value function with box-constrained inputs -u_bound <= u_t <= u_bound.
+    KKT conditions include complementarity for the control bounds.
     """
 
     def __init__(self, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
-                 x_lo=0.0, x_hi=4.0, verbose=True, time_limit=None):
+                 x_lo=0.0, x_hi=4.0, u_bound=10.0, verbose=True, time_limit=None):
         n_x = 2
         n_u = 1
         Q = np.eye(n_x)
         R = np.eye(n_u) * r
-        u_max = 1000
 
-        M = gp.Model("cartpole_phase1")
+        M = gp.Model("cartpole_constrained_phase1")
         M.Params.OutputFlag = 1 if verbose else 0
         M.Params.FeasibilityTol = 1e-9
-        M.Params.NonConvex = 2   # bilinear costate term + quadratic objective
+        M.Params.NonConvex = 2   # bilinear costate term + complementarity
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
         self.model = M
@@ -144,14 +142,16 @@ class CartpolePhase1:
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
 
         # T-horizon MPC trajectory
-        # x_mpc = {t: M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_mpc_{t}")
-        #          for t in range(T + 1)}
         x_mpc = {t: M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"x_mpc_{t}")
                  for t in range(T + 1)}
-        u_mpc = {t: M.addVars(n_u, lb=-u_max, ub=u_max, name=f"u_mpc_{t}")
+        u_mpc = {t: M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"u_mpc_{t}")
                  for t in range(T)}
         lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lam_{t}")
                  for t in range(T + 1)}
+
+        # Dual variables for box constraints: mu_up >= 0 (u <= u_bound), mu_lo >= 0 (u >= -u_bound)
+        mu_up = {t: M.addVars(n_u, lb=0.0, name=f"mu_up_{t}") for t in range(T)}
+        mu_lo = {t: M.addVars(n_u, lb=0.0, name=f"mu_lo_{t}") for t in range(T)}
 
         # MPC initial condition
         for i in range(n_x):
@@ -193,13 +193,25 @@ class CartpolePhase1:
                 name=f"costate_1_{t}"
             )
 
-        # KKT: control stationarity
+        # KKT: control stationarity with dual variables
+        # R u_t + dt/(mL²) λ_{t+1}[1] + μ_up_t - μ_lo_t = 0
         for t in range(T):
             M.addConstr(
                 R[0, 0] * u_mpc[t][0]
-                + dt / (mass * length**2) * lam[t+1][1] == 0,
-                name=f"ctrl_opt_{t}"
+                + dt / (mass * length**2) * lam[t+1][1]
+                + mu_up[t][0] - mu_lo[t][0] == 0,
+                name=f"ctrl_stat_{t}"
             )
+
+        # KKT: complementarity for upper bound  μ_up_t * (u_t - u_bound) = 0
+        for t in range(T):
+            M.addConstr(mu_up[t][0] * (u_mpc[t][0] - u_bound) == 0,
+                        name=f"comp_up_{t}")
+
+        # KKT: complementarity for lower bound  μ_lo_t * (-u_bound - u_t) = 0
+        for t in range(T):
+            M.addConstr(mu_lo[t][0] * (-u_bound - u_mpc[t][0]) == 0,
+                        name=f"comp_lo_{t}")
 
         # Objective: maximize V_0 = J*(x_0)
         V0 = (
@@ -208,13 +220,10 @@ class CartpolePhase1:
             + gp.quicksum(R[j, j] * u_mpc[t][j] * u_mpc[t][j]
                           for t in range(T) for j in range(n_u))
         )
-        # M.addConstr(V0 <= 100)
         M.setObjective(V0, GRB.MAXIMIZE)
 
     def solve(self):
         self.model.optimize()
-        # import pdb
-        # pdb.set_trace()
         return self.model.Status, self.model.Runtime
 
     def V0_max(self):
@@ -223,9 +232,9 @@ class CartpolePhase1:
         return self.model.ObjVal
 
 
-class CartpoleILQRVerify:
+class CartpoleConstrainedVerify:
     def __init__(self, n=10, K=3, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
-                 rho=0.2, x_lo=0.0, x_hi=4.0, seed=None, verbose=True,
+                 rho=0.2, x_lo=0.0, x_hi=4.0, u_bound=10.0, seed=None, verbose=True,
                  time_limit=None, V_0_max=None):
         self.n, self.K, self.rho = n, K, rho
         self.T = T
@@ -236,25 +245,26 @@ class CartpoleILQRVerify:
         n_u = 1
         Q = np.eye(n_x)
         R = np.eye(n_u) * r
-        u_max = 1000
 
         # Model
-        M = gp.Model("cartpole_ilqr_verify")
+        M = gp.Model("cartpole_constrained_verify")
         M.Params.OutputFlag = 1 if self.verbose else 0
         M.Params.FeasibilityTol = 1e-9
-        M.Params.NonConvex = 2   # bilinear costate term; quadratic V constraints
+        M.Params.NonConvex = 2   # bilinear costate + complementarity + quadratic V
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
         self.model = M
 
         # Store state/control trajectories
-        self.x = {}      # states: x[k] for k=0..K
-        self.u = {}      # controls: u[k] for k=0..K-1
+        self.x = {}
+        self.u = {}
 
         # Store MPC variables for each timestep
-        self.x_mpc = {}      # MPC state variables (T+1 timesteps)
-        self.u_mpc_var = {}  # MPC control variables (T timesteps)
-        self.lambda_mpc = {} # MPC costate variables for optimality (T+1 timesteps)
+        self.x_mpc = {}
+        self.u_mpc_var = {}
+        self.lambda_mpc = {}
+        self.mu_up_mpc = {}
+        self.mu_lo_mpc = {}
 
         # Auxiliary variables for dynamics
         self.sin_theta = {}
@@ -268,7 +278,6 @@ class CartpoleILQRVerify:
 
         # CREATE ALL STATE VARIABLES FIRST (k=0 to K)
         for k in range(K + 1):
-            # self.x[k] = M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_{k}")
             if k == 0:
                 self.x[k] = M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_{k}")
             else:
@@ -276,19 +285,26 @@ class CartpoleILQRVerify:
 
         # Create variables and constraints for K timesteps
         for k in range(K):
-            # Control at timestep k (applied from state k)
-            self.u[k] = M.addVars(n_u, lb=-u_max, ub=u_max, name=f"u_{k}")
+            # Control at timestep k
+            self.u[k] = M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"u_{k}")
 
             # MPC variables: solve T-horizon MPC at each timestep k
-            # MPC states: x_mpc[k][t] for t=0..T
             self.x_mpc[k] = {}
             for t in range(T + 1):
-                self.x_mpc[k][t] = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"x_mpc_{k}_{t}")
+                self.x_mpc[k][t] = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY,
+                                              name=f"x_mpc_{k}_{t}")
 
-            # MPC controls: u_mpc[k][t] for t=0..T-1
             self.u_mpc_var[k] = {}
             for t in range(T):
-                self.u_mpc_var[k][t] = M.addVars(n_u, lb=-u_max, ub=u_max, name=f"u_mpc_{k}_{t}")
+                self.u_mpc_var[k][t] = M.addVars(n_u, lb=-u_bound, ub=u_bound,
+                                                  name=f"u_mpc_{k}_{t}")
+
+            # Dual variables for box constraints
+            self.mu_up_mpc[k] = {}
+            self.mu_lo_mpc[k] = {}
+            for t in range(T):
+                self.mu_up_mpc[k][t] = M.addVars(n_u, lb=0.0, name=f"mu_up_mpc_{k}_{t}")
+                self.mu_lo_mpc[k][t] = M.addVars(n_u, lb=0.0, name=f"mu_lo_mpc_{k}_{t}")
 
             # MPC initial condition: x_mpc[k][0] = x[k]
             for i in range(n_x):
@@ -302,38 +318,35 @@ class CartpoleILQRVerify:
             for t in range(T):
                 self.sin_theta_mpc[k][t] = M.addVar(lb=-1, ub=1, name=f"sin_theta_mpc_{k}_{t}")
                 self.cos_theta_mpc[k][t] = M.addVar(lb=-1, ub=1, name=f"cos_theta_mpc_{k}_{t}")
-                self.theta_ddot_mpc[k][t] = M.addVar(lb=-GRB.INFINITY, name=f"theta_ddot_mpc_{k}_{t}")
+                self.theta_ddot_mpc[k][t] = M.addVar(lb=-GRB.INFINITY,
+                                                      name=f"theta_ddot_mpc_{k}_{t}")
 
-                # Nonlinear dynamics constraints for MPC
-                M.addGenConstrSin(self.x_mpc[k][t][0], self.sin_theta_mpc[k][t], name=f"sin_mpc_{k}_{t}")
-                M.addGenConstrCos(self.x_mpc[k][t][0], self.cos_theta_mpc[k][t], name=f"cos_mpc_{k}_{t}")
+                M.addGenConstrSin(self.x_mpc[k][t][0], self.sin_theta_mpc[k][t],
+                                  name=f"sin_mpc_{k}_{t}")
+                M.addGenConstrCos(self.x_mpc[k][t][0], self.cos_theta_mpc[k][t],
+                                  name=f"cos_mpc_{k}_{t}")
 
-                # theta_{t+1} = theta_t + dt * theta_dot_t
                 M.addConstr(
                     self.x_mpc[k][t+1][0] == self.x_mpc[k][t][0] + dt * self.x_mpc[k][t][1],
                     name=f"mpc_theta_{k}_{t}"
                 )
-
-                # theta_ddot = (g/L) * sin(theta) + u / (m*L²)
                 M.addConstr(
                     self.theta_ddot_mpc[k][t] == g/length * self.sin_theta_mpc[k][t] +
                     self.u_mpc_var[k][t][0] / (mass * length**2),
                     name=f"mpc_angular_accel_{k}_{t}"
                 )
-
-                # theta_dot_{t+1} = theta_dot_t + dt * theta_ddot
                 M.addConstr(
                     self.x_mpc[k][t+1][1] == self.x_mpc[k][t][1] + dt * self.theta_ddot_mpc[k][t],
                     name=f"mpc_theta_dot_{k}_{t}"
                 )
 
-            # KKT optimality conditions for MPC
-            # Add costate (dual) variables for dynamics constraints
+            # KKT: costate variables
             self.lambda_mpc[k] = {}
             for t in range(T + 1):
-                self.lambda_mpc[k][t] = M.addVars(n_x, lb=-GRB.INFINITY, name=f"lambda_mpc_{k}_{t}")
+                self.lambda_mpc[k][t] = M.addVars(n_x, lb=-GRB.INFINITY,
+                                                   name=f"lambda_mpc_{k}_{t}")
 
-            # Terminal costate condition: λ_T = Q x_T
+            # Terminal costate
             for i in range(n_x):
                 M.addConstr(
                     self.lambda_mpc[k][T][i] == Q[i, i] * self.x_mpc[k][T][i],
@@ -341,19 +354,13 @@ class CartpoleILQRVerify:
                 )
 
             # Backward sweep: costate equations
-            # λ_t = Q x_t + (∂f/∂x_t)^T λ_{t+1}
-            # For f = [x₁ + dt·x₂, x₂ + dt·(g/L·sin(x₁) + u/(m·L²))]
-            # ∂f/∂x = [[1, dt], [dt·g/L·cos(x₁), 1]]
             for t in range(T - 1, -1, -1):
-                # λ_t[0] = Q[0,0] x_t[0] + 1 · λ_{t+1}[0] + dt·g/L·cos(x_t[0]) · λ_{t+1}[1]
                 M.addConstr(
                     self.lambda_mpc[k][t][0] == Q[0, 0] * self.x_mpc[k][t][0] +
                     self.lambda_mpc[k][t+1][0] +
                     dt * g / length * self.cos_theta_mpc[k][t] * self.lambda_mpc[k][t+1][1],
                     name=f"costate_0_{k}_{t}"
                 )
-
-                # λ_t[1] = Q[1,1] x_t[1] + dt · λ_{t+1}[0] + 1 · λ_{t+1}[1]
                 M.addConstr(
                     self.lambda_mpc[k][t][1] == Q[1, 1] * self.x_mpc[k][t][1] +
                     dt * self.lambda_mpc[k][t+1][0] +
@@ -361,78 +368,88 @@ class CartpoleILQRVerify:
                     name=f"costate_1_{k}_{t}"
                 )
 
-            # Control optimality: R u_t + (∂f/∂u_t)^T λ_{t+1} = 0
-            # ∂f/∂u = [0, dt/(m·L²)]^T
-            # So: R u_t + dt/(m·L²) · λ_{t+1}[1] = 0
+            # KKT: control stationarity with dual variables
             for t in range(T):
                 M.addConstr(
                     R[0, 0] * self.u_mpc_var[k][t][0] +
-                    dt / (mass * length**2) * self.lambda_mpc[k][t+1][1] == 0,
-                    name=f"control_opt_{k}_{t}"
+                    dt / (mass * length**2) * self.lambda_mpc[k][t+1][1] +
+                    self.mu_up_mpc[k][t][0] - self.mu_lo_mpc[k][t][0] == 0,
+                    name=f"control_stat_{k}_{t}"
                 )
 
-            # Link the first control action to the applied control
+            # KKT: complementarity for upper bound  μ_up * (u - u_bound) = 0
+            for t in range(T):
+                M.addConstr(
+                    self.mu_up_mpc[k][t][0] * (self.u_mpc_var[k][t][0] - u_bound) == 0,
+                    name=f"comp_up_{k}_{t}"
+                )
+
+            # KKT: complementarity for lower bound  μ_lo * (-u_bound - u) = 0
+            for t in range(T):
+                M.addConstr(
+                    self.mu_lo_mpc[k][t][0] * (-u_bound - self.u_mpc_var[k][t][0]) == 0,
+                    name=f"comp_lo_{k}_{t}"
+                )
+
+            # Link first control action to applied control
             M.addConstr(self.u[k][0] == self.u_mpc_var[k][0][0], name=f"control_link_{k}")
 
-            # Auxiliary variables for actual dynamics (state evolution)
+            # Auxiliary variables for actual dynamics
             self.sin_theta[k] = M.addVar(lb=-1, ub=1, name=f"sin_theta_{k}")
             self.cos_theta[k] = M.addVar(lb=-1, ub=1, name=f"cos_theta_{k}")
             self.theta_ddot[k] = M.addVar(lb=-GRB.INFINITY, name=f"theta_ddot_{k}")
 
-            # Nonlinear dynamics constraints for actual state evolution
             M.addGenConstrSin(self.x[k][0], self.sin_theta[k], name=f"sin_{k}")
             M.addGenConstrCos(self.x[k][0], self.cos_theta[k], name=f"cos_{k}")
 
-            # theta_{k+1} = theta_k + dt * theta_dot_k
             M.addConstr(
                 self.x[k+1][0] == self.x[k][0] + dt * self.x[k][1],
                 name=f"integrate_theta_{k}"
             )
-
-            # theta_ddot = (g/L) * sin(theta) + u / (m*L²)
             M.addConstr(
-                self.theta_ddot[k] == g/length * self.sin_theta[k] + self.u[k][0] / (mass * length**2),
+                self.theta_ddot[k] == g/length * self.sin_theta[k] +
+                self.u[k][0] / (mass * length**2),
                 name=f"angular_accel_{k}"
             )
-
-            # theta_dot_{k+1} = theta_dot_k + dt * theta_ddot
             M.addConstr(
                 self.x[k+1][1] == self.x[k][1] + dt * self.theta_ddot[k],
                 name=f"integrate_theta_dot_{k}"
             )
 
         # ---------------------------------------------------------------
-        # Phase 2: extra MPC at k=K to compute V_next = J*(x[K])
-        # Only added when V_0_max is provided (two-phase mode).
+        # Extra MPC at k=K to compute V_next = J*(x[K])
         # ---------------------------------------------------------------
-        # if V_0_max is not None:
         self.x_mpc[K] = {}
         for t in range(T + 1):
             self.x_mpc[K][t] = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY,
-                                            name=f"x_mpc_{K}_{t}")
+                                          name=f"x_mpc_{K}_{t}")
         self.u_mpc_var[K] = {}
         for t in range(T):
-            self.u_mpc_var[K][t] = M.addVars(n_u, lb=-u_max, ub=u_max,
-                                                name=f"u_mpc_{K}_{t}")
-        # Initial condition: MPC starts from actual state x[K]
+            self.u_mpc_var[K][t] = M.addVars(n_u, lb=-u_bound, ub=u_bound,
+                                              name=f"u_mpc_{K}_{t}")
+        self.mu_up_mpc[K] = {}
+        self.mu_lo_mpc[K] = {}
+        for t in range(T):
+            self.mu_up_mpc[K][t] = M.addVars(n_u, lb=0.0, name=f"mu_up_mpc_{K}_{t}")
+            self.mu_lo_mpc[K][t] = M.addVars(n_u, lb=0.0, name=f"mu_lo_mpc_{K}_{t}")
+
         for i in range(n_x):
-            M.addConstr(self.x_mpc[K][0][i] == self.x[K][i],
-                        name=f"mpc_init_{K}_{i}")
+            M.addConstr(self.x_mpc[K][0][i] == self.x[K][i], name=f"mpc_init_{K}_{i}")
 
         self.sin_theta_mpc[K] = {}
         self.cos_theta_mpc[K] = {}
         self.theta_ddot_mpc[K] = {}
         for t in range(T):
             self.sin_theta_mpc[K][t] = M.addVar(lb=-1, ub=1,
-                                                    name=f"sin_theta_mpc_{K}_{t}")
+                                                 name=f"sin_theta_mpc_{K}_{t}")
             self.cos_theta_mpc[K][t] = M.addVar(lb=-1, ub=1,
-                                                    name=f"cos_theta_mpc_{K}_{t}")
+                                                 name=f"cos_theta_mpc_{K}_{t}")
             self.theta_ddot_mpc[K][t] = M.addVar(lb=-GRB.INFINITY,
-                                                    name=f"theta_ddot_mpc_{K}_{t}")
+                                                  name=f"theta_ddot_mpc_{K}_{t}")
             M.addGenConstrSin(self.x_mpc[K][t][0], self.sin_theta_mpc[K][t],
-                                name=f"sin_mpc_{K}_{t}")
+                              name=f"sin_mpc_{K}_{t}")
             M.addGenConstrCos(self.x_mpc[K][t][0], self.cos_theta_mpc[K][t],
-                                name=f"cos_mpc_{K}_{t}")
+                              name=f"cos_mpc_{K}_{t}")
             M.addConstr(self.x_mpc[K][t+1][0] ==
                         self.x_mpc[K][t][0] + dt * self.x_mpc[K][t][1],
                         name=f"mpc_theta_{K}_{t}")
@@ -447,7 +464,7 @@ class CartpoleILQRVerify:
         self.lambda_mpc[K] = {}
         for t in range(T + 1):
             self.lambda_mpc[K][t] = M.addVars(n_x, lb=-GRB.INFINITY,
-                                                name=f"lambda_mpc_{K}_{t}")
+                                               name=f"lambda_mpc_{K}_{t}")
         for i in range(n_x):
             M.addConstr(self.lambda_mpc[K][T][i] == Q[i, i] * self.x_mpc[K][T][i],
                         name=f"terminal_costate_{K}_{i}")
@@ -466,41 +483,42 @@ class CartpoleILQRVerify:
         for t in range(T):
             M.addConstr(
                 R[0, 0] * self.u_mpc_var[K][t][0]
-                + dt / (mass * length**2) * self.lambda_mpc[K][t+1][1] == 0,
-                name=f"control_opt_{K}_{t}"
+                + dt / (mass * length**2) * self.lambda_mpc[K][t+1][1]
+                + self.mu_up_mpc[K][t][0] - self.mu_lo_mpc[K][t][0] == 0,
+                name=f"control_stat_{K}_{t}"
+            )
+        for t in range(T):
+            M.addConstr(
+                self.mu_up_mpc[K][t][0] * (self.u_mpc_var[K][t][0] - u_bound) == 0,
+                name=f"comp_up_{K}_{t}"
+            )
+            M.addConstr(
+                self.mu_lo_mpc[K][t][0] * (-u_bound - self.u_mpc_var[K][t][0]) == 0,
+                name=f"comp_lo_{K}_{t}"
             )
 
-        # Worst-case objective
-        # if V_0_max is None:
-        #     # Original: Lyapunov candidate V(x) = ||x||^2
-        #     V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
-        #     V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
-        # else:
-        # Phase 2: Lyapunov candidate V(x) = J*(x) = MPC value function
-        # V_curr = (
-        #     gp.quicksum(Q[i, i] * self.x_mpc[0][t][i] * self.x_mpc[0][t][i]
-        #                 for t in range(T + 1) for i in range(n_x))
-        #     + gp.quicksum(R[j, j] * self.u_mpc_var[0][t][j] * self.u_mpc_var[0][t][j]
-        #                     for t in range(T) for j in range(n_u))
-        # )
-        # V_next = (
-        #     gp.quicksum(Q[i, i] * self.x_mpc[K][t][i] * self.x_mpc[K][t][i]
-        #                 for t in range(T + 1) for i in range(n_x))
-        #     + gp.quicksum(R[j, j] * self.u_mpc_var[K][t][j] * self.u_mpc_var[K][t][j]
-        #                     for t in range(T) for j in range(n_u))
-        # )
-        # # Restrict to initial conditions reachable under the MPC policy
-        # M.addConstr(V_curr <= V_0_max, name="V0_bound")
-
-        V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
-        V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
+        # Lyapunov candidate V(x) = ||x||^2
+        # V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
+        # V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
+        V_curr = (
+            gp.quicksum(Q[i, i] * self.x_mpc[0][t][i] * self.x_mpc[0][t][i]
+                        for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(R[j, j] * self.u_mpc_var[0][t][j] * self.u_mpc_var[0][t][j]
+                            for t in range(T) for j in range(n_u))
+        )
+        V_next = (
+            gp.quicksum(Q[i, i] * self.x_mpc[K][t][i] * self.x_mpc[K][t][i]
+                        for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(R[j, j] * self.u_mpc_var[K][t][j] * self.u_mpc_var[K][t][j]
+                            for t in range(T) for j in range(n_u))
+        )
 
         self.V_curr = V_curr
         self.V_next = V_next
 
         eps = 1 - rho
         self.orig_objective = 0
-        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="V_curr_pos")
+        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="lyap_decrease")
         M.setObjective(self.orig_objective, GRB.MAXIMIZE)
 
     def solve(self):
@@ -520,21 +538,17 @@ class CartpoleILQRVerify:
             "V_next": self.V_next.getValue(),
             "V_curr": self.V_curr.getValue(),
 
-            # State trajectory: x[0] to x[K]
             "x": {k: v2dict(self.x[k]) for k in range(self.K + 1)},
-
-            # Control trajectory: u[0] to u[K-1]
             "u": {k: v2dict(self.u[k]) for k in range(self.K)},
 
-            # MPC trajectories
             "x_mpc": {k: {t: v2dict(self.x_mpc[k][t]) for t in range(len(self.x_mpc[k]))}
-                     for k in range(self.K)},
+                      for k in range(self.K)},
             "u_mpc": {k: {t: v2dict(self.u_mpc_var[k][t]) for t in range(len(self.u_mpc_var[k]))}
-                     for k in range(self.K)},
-            "lambda_mpc": {k: {t: v2dict(self.lambda_mpc[k][t]) for t in range(len(self.lambda_mpc[k]))}
-                          for k in range(self.K)},
+                      for k in range(self.K)},
+            "lambda_mpc": {k: {t: v2dict(self.lambda_mpc[k][t])
+                               for t in range(len(self.lambda_mpc[k]))}
+                           for k in range(self.K)},
 
-            # Auxiliary variables
             "sin_theta": {k: self.sin_theta[k].X for k in range(self.K)},
             "cos_theta": {k: self.cos_theta[k].X for k in range(self.K)},
             "theta_ddot": {k: self.theta_ddot[k].X for k in range(self.K)},

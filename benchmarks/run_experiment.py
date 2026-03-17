@@ -4,7 +4,12 @@ import hydra
 
 import benchmarks.cartpole as cartpole
 import benchmarks.cartpole_ilqr as cartpole_ilqr
+import benchmarks.cartpole_constrained as cartpole_constrained
+import benchmarks.cartpole_ilqr_cycle as cartpole_ilqr_cycle
+import benchmarks.cartpole_recursive_feas as cartpole_recursive_feas
 import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
+import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
+import benchmarks.stir_tank_subopt as stir_tank_subopt
 
 
 import matplotlib
@@ -21,9 +26,34 @@ def main_run_cartpole_ilqr(cfg):
     cartpole_ilqr.run(cfg)
 
 
+@hydra.main(config_path='configs', config_name='cartpole_constrained.yaml')
+def main_run_cartpole_constrained(cfg):
+    cartpole_constrained.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_ilqr_cycle.yaml')
+def main_run_cartpole_ilqr_cycle(cfg):
+    cartpole_ilqr_cycle.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_recursive_feas.yaml')
+def main_run_cartpole_recursive_feas(cfg):
+    cartpole_recursive_feas.run(cfg)
+
+
 @hydra.main(config_path='configs', config_name='nonlinear_double_integrator.yaml')
 def main_run_nonlinear_double_integrator(cfg):
     nonlinear_double_integrator.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='bilinear_recursive_feas.yaml')
+def main_run_bilinear_recursive_feas(cfg):
+    bilinear_recursive_feas.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
+def main_run_stir_tank_subopt(cfg):
+    stir_tank_subopt.run(cfg)
 
 
 # @hydra.main(config_path='configs', config_name='power_converter.yaml')
@@ -88,6 +118,26 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'cartpole_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_cartpole_ilqr()
+    elif sys.argv[1] == 'cartpole_constrained':
+        sys.argv[1] = base + 'cartpole_constrained/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_constrained()
+    elif sys.argv[1] == 'cartpole_ilqr_cycle':
+        sys.argv[1] = base + 'cartpole_ilqr_cycle/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_ilqr_cycle()
+    elif sys.argv[1] == 'cartpole_recursive_feas':
+        sys.argv[1] = base + 'cartpole_recursive_feas/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_recursive_feas()
+    elif sys.argv[1] == 'bilinear_recursive_feas':
+        sys.argv[1] = base + 'bilinear_recursive_feas/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_bilinear_recursive_feas()
+    elif sys.argv[1] == 'stir_tank_subopt':
+        sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_stir_tank_subopt()
     elif sys.argv[1] == 'sparse_coding':
         sys.argv[1] = base + 'sparse_coding/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]

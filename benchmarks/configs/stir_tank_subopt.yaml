@@ -1,0 +1,4 @@
+T_vals: [2, 8]
+r: 1.0
+e_lim: 0.2   # state constraint radius: ||x - xe||_inf <= e_lim
+dt: 1.0      # Euler discretization step size

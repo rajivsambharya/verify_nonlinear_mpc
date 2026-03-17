@@ -1,0 +1,12 @@
+K: 2
+T_vals: [2, 4]
+dt: .01
+r: 0.0
+tol: 0.0001
+time_limit: 1000
+n: 10
+rho_max: 5
+x_mins: [-0.5]
+x_maxes: [0.5]
+u_bound: 10.0
+num_samples: 10

@@ -1,9 +1,11 @@
-K: 7 #6 #15
-T_vals: [1, 5, 10]
+K: 3 #6 #15
+T_vals: [2, 4] #, 10]
 dt: .1
+r: 0.0 #0.0
 time_limit: 1000
 n: 10
 rho_max: 5
-x_mins: [-0.5, 5]
-x_maxes: [0.5, 8]
+x_mins: [-0.1] #[-1.0]
+x_maxes: [0.1] #[1.0]
 num_samples: 10
+tol: 1e-4
