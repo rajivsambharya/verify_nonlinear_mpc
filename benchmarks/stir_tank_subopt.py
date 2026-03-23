@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 
 cmap = plt.cm.Set1
 colors = cmap.colors
+markers = ['o', 's', '^', 'D', 'v', 'p', 'h', '*']
 
-FONT_SIZE = 33
+FONT_SIZE = 32
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
@@ -62,34 +63,78 @@ def _stir_tank_discrete(dt):
 
 
 def run(cfg):
-    # T_max = cfg.T_max
-    e_lim = getattr(cfg, 'e_lim', 0.2)
-    r     = getattr(cfg, 'r', 0.1)
-    dt    = getattr(cfg, 'dt', 1.0)
+    e_lim  = getattr(cfg, 'e_lim', 0.2)
+    dt     = getattr(cfg, 'dt', 1.0)
+    T_vals = list(cfg.T_vals)
+    r_vals = list(cfg.r_vals)
 
-    # T_vals  = list(range(5, T_max + 1))
-    T_vals = cfg.T_vals
-    obj_vals = []
+    # results[r] = {'norm_obj': [...], 'time': [...]}
+    results = {}
 
-    for T in T_vals:
-        ver = StirTankVerify(T=T, r=r, e_lim=e_lim, dt=dt, verbose=True)
-        status, elapsed = ver.solve()
-        sol = ver.solution_dict()
-        obj = sol['obj'] if sol['obj'] is not None else float('nan')
-        print(f"T={T}, status={status}, obj={obj:.6f}, time={elapsed:.3f}s")
-        obj_vals.append(obj)
+    for r in r_vals:
+        norm_obj_vals = []
+        obj_vals = []
+        time_vals     = []
+        for T in T_vals:
+            ver = StirTankVerify(T=T, r=r, e_lim=e_lim, dt=dt, verbose=True)
+            status, elapsed = ver.solve()
+            sol = ver.solution_dict()
+            obj = sol['obj'] if sol['obj'] is not None else float('nan')
+            print(f"r={r}, T={T}, status={status}, obj={obj:.6f}, time={elapsed:.3f}s")
+            norm_obj_vals.append(obj / T)
+            obj_vals.append(obj)
+            time_vals.append(elapsed)
+        results[r] = {'norm_obj': norm_obj_vals, 'obj': obj_vals, 'time': time_vals}
 
+    # normalized suboptimality
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(T_vals, obj_vals, marker='o', linewidth=2)
-    ax.set_xlabel('Horizon $T$')
-    ax.set_ylabel(r'$J_{\mathrm{kkt}} - J_{\mathrm{opt}}$')
+    for ri, r in enumerate(r_vals):
+        ax.plot(T_vals, results[r]['norm_obj'],
+                marker=markers[ri % len(markers)], linewidth=2,
+                color=colors[ri % len(colors)], label=f'$r={r}$')
+    ax.set_xlabel('horizon $T$')
+    # ax.set_ylabel('norm. worst-case\nsuboptimality')
+    ax.set_ylabel('normalized worst-case\nsuboptimality')
     ax.set_yscale('log')
-    ax.set_title(r'Stir tank: worst-case KKT suboptimality vs.\ horizon')
+    # ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig('norm_stir_tank_suboptimality.pdf', bbox_inches='tight')
+    print("Plot saved to norm_stir_tank_suboptimality.pdf")
+
+    # suboptimality
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for ri, r in enumerate(r_vals):
+        ax.plot(T_vals, results[r]['obj'],
+                marker=markers[ri % len(markers)], linewidth=2,
+                color=colors[ri % len(colors)], label=f'$r={r}$')
+    ax.set_xlabel('horizon $T$')
+    # ax.set_ylabel('norm. worst-case\nsuboptimality')
+    ax.set_ylabel('worst-case\nsuboptimality')
+    ax.set_yscale('log')
+    # ax.legend()
     ax.grid(True)
     fig.tight_layout()
     fig.savefig('stir_tank_suboptimality.pdf', bbox_inches='tight')
     print("Plot saved to stir_tank_suboptimality.pdf")
-    return obj_vals
+
+
+
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    for ri, r in enumerate(r_vals):
+        ax2.plot(T_vals, results[r]['time'],
+                 marker=markers[ri % len(markers)], linewidth=2,
+                 color=colors[ri % len(colors)], label=f'$r={r}$')
+    ax2.set_xlabel('horizon $T$')
+    ax2.set_ylabel('solve time (seconds)')
+    ax2.set_yscale('log')
+    # ax2.legend()
+    ax2.grid(True)
+    fig2.tight_layout()
+    fig2.savefig('stir_tank_solve_time.pdf', bbox_inches='tight')
+    print("Plot saved to stir_tank_solve_time.pdf")
+
+    return results
 
 
 # class StirTankVerify:

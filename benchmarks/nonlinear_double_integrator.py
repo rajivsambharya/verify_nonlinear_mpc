@@ -18,13 +18,14 @@ plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
 
 
 def run(cfg):
-    T_max = cfg.T_max
+    # T_max = cfg.T_max
     x_lo = cfg.x_mins
     x_hi = cfg.x_maxes
-    r = getattr(cfg, 'r', 0.1)
+    r = getattr(cfg, 'r', 0.0)
     u_max = getattr(cfg, 'u_max', 10.0)
 
-    T_vals = list(range(5, T_max + 1))
+    # T_vals = list(range(5, T_max + 1))
+    T_vals = cfg.T_vals
     obj_vals = []
 
     for T in T_vals:
@@ -42,8 +43,8 @@ def run(cfg):
         obj = sol['obj'] if sol['obj'] is not None else float('nan')
         print(f"T={T}, status={status}, obj={obj:.6f}, time={elapsed:.3f}s")
         obj_vals.append(obj)
-        # import pdb
-        # pdb.set_trace()
+        import pdb
+        pdb.set_trace()
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(T_vals, obj_vals, marker='o', linewidth=2)
@@ -78,7 +79,7 @@ class NonlinearDoubleIntegratorVerify:
     def __init__(self, T=5, r=0.1, x_lo=-4.0, x_hi=4.0, u_max=10.0, verbose=True):
         n_x = 2
         n_u = 1
-        alpha = 0.025   # nonlinear gain: f(x) = alpha * ||x||^2 * ones(2)
+        alpha = 0.1 #0.02 #5   # nonlinear gain: f(x) = alpha * ||x||^2 * ones(2)
 
         # Dynamics
         A = np.array([[1.0, 1.0],
@@ -304,7 +305,7 @@ class NonlinearDoubleIntegratorVerifyFree:
     def __init__(self, T=5, r=0.1, x_lo=-4.0, x_hi=4.0, u_max=None, verbose=True):
         n_x = 2
         n_u = 1
-        alpha = 0.025   # f(x) = alpha * ||x||^2 * ones(2)
+        alpha = 0.1 #0.02 #5   # f(x) = alpha * ||x||^2 * ones(2)
 
         A = np.array([[1.0, 1.0],
                       [0.0, 1.0]])
