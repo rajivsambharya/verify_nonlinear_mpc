@@ -10,6 +10,7 @@ import benchmarks.cartpole_recursive_feas as cartpole_recursive_feas
 import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
 import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
 import benchmarks.stir_tank_subopt as stir_tank_subopt
+import benchmarks.spring_masses as spring_masses
 
 
 import matplotlib
@@ -54,6 +55,11 @@ def main_run_bilinear_recursive_feas(cfg):
 @hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
 def main_run_stir_tank_subopt(cfg):
     stir_tank_subopt.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='spring_masses.yaml')
+def main_run_spring_masses(cfg):
+    spring_masses.run(cfg)
 
 
 # @hydra.main(config_path='configs', config_name='power_converter.yaml')
@@ -138,6 +144,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_stir_tank_subopt()
+    elif sys.argv[1] == 'spring_masses':
+        sys.argv[1] = base + 'spring_masses/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_spring_masses()
     elif sys.argv[1] == 'sparse_coding':
         sys.argv[1] = base + 'sparse_coding/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
