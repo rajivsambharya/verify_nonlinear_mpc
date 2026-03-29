@@ -7,4 +7,4 @@ x0_mins: [-1.]
 x0_maxes: [1.]
 x_feas_mins: [-2.0]
 x_feas_maxes: [2.0]
-u_bound: 1.0
+u_bound: 0.1

@@ -30,10 +30,12 @@ def run(cfg):
     n_masses    = getattr(cfg, 'n_masses', 6)
     c_spring    = getattr(cfg, 'c', 1.0)
     d_damp      = getattr(cfg, 'd', 0.1)
+    big_M       = getattr(cfg, 'big_M', 1e3)
 
     A_c, B_c, _ = oscillating_masses_system(n_masses=n_masses, c=c_spring, d=d_damp)
     A_d, B_d    = discretize_euler(A_c, B_c, dt)
     n_x, n_u    = A_d.shape[0], B_d.shape[1]
+    
 
     Q = np.eye(n_x)
     R = r * np.eye(n_u)
@@ -46,7 +48,8 @@ def run(cfg):
         # Phase 1: upper bound on V_0 = J*(x_0) for this horizon T
         phase1 = SpringMassPhase1(
             T=T, A_d=A_d, B_d=B_d, Q=Q, R=R, u_max=u_max,
-            x_lo=x_min, x_hi=x_max, verbose=True, time_limit=cfg.time_limit
+            x_lo=x_min, x_hi=x_max, verbose=True, time_limit=cfg.time_limit,
+            big_M=big_M
         )
         phase1.solve()
         V_0_max = phase1.V0_max()
@@ -66,7 +69,8 @@ def run(cfg):
                 ver = SpringMassVerify(
                     K=k+1, T=T, A_d=A_d, B_d=B_d, Q=Q, R=R,
                     u_max=u_max, x_lo=x_min, x_hi=x_max, rho=rho_mid,
-                    verbose=True, time_limit=cfg.time_limit, V_0_max=V_0_max
+                    verbose=True, time_limit=cfg.time_limit, V_0_max=V_0_max,
+                    big_M=big_M
                 )
                 status, solve_time = ver.solve()
                 total_time += solve_time
@@ -83,6 +87,8 @@ def run(cfg):
                     rho_hi   = rho_mid
                     best_rho = rho_mid
                     best_sol = sol
+                import pdb
+                pdb.set_trace()
 
             if best_sol is not None:
                 print(f"Best verified rho for T={T}, k={k+1}: {best_rho:.6f}")
@@ -91,8 +97,8 @@ def run(cfg):
                 print(f"Could not verify stability for T={T}, k={k+1}")
                 opt_vals[ti, k] = np.inf
             times[ti, k] = total_time
-            import pdb
-            pdb.set_trace()
+
+            
 
     k_axis = np.arange(K) + 1
 
@@ -124,47 +130,44 @@ def run(cfg):
     return opt_vals
 
 
-def oscillating_masses_system(n_masses=6, c=1.0, d=0.1):
+def oscillating_masses_system(n_masses=4, c=1.0, d=0.1):
     """
     Oscillating masses system (continuous-time).
-    n_masses = 6, n_springs = 3, mass = 1.
+    n_masses must be even; n_springs = n_masses // 2, mass = 1.
     a = -2c, b = -2.
-    State: x = [positions; velocities] in R^12
-    Input: u in R^3
+    State: x = [positions; velocities] in R^{2*n_masses}
+    Input: u in R^{n_springs}
+
+    Spring k (0-indexed) connects mass 2k (+) and mass 2k+1 (-).
     """
+    assert n_masses % 2 == 0, "n_masses must be even"
     a = -2 * c
     b = -2.0
-    n = n_masses  # 6
+    n = n_masses
+    n_springs = n_masses // 2
 
-    # Build L_6: the spring coupling matrix in R^{6x6}
-    # 3 springs connecting pairs (1,2), (3,5), (4,6) (1-indexed):
-    #   spring 1: mass 1 (+e1) and mass 2 (-e1)
-    #   spring 2: mass 3 (+e2) and mass 5 (-e2)
-    #   spring 3: mass 4 (+e3) and mass 6 (-e3)
-    # F in R^{6x3}: rows are masses, columns are springs
-    F = np.zeros((n, 3))
-    F[0, 0] =  1.0   # +e1 (mass 1, spring 1)
-    F[1, 0] = -1.0   # -e1 (mass 2, spring 1)
-    F[2, 1] =  1.0   # +e2 (mass 3, spring 2)
-    F[3, 2] =  1.0   # +e3 (mass 4, spring 3)
-    F[4, 1] = -1.0   # -e2 (mass 5, spring 2)
-    F[5, 2] = -1.0   # -e3 (mass 6, spring 3)
+    # F in R^{n x n_springs}: rows are masses, columns are springs.
+    # Spring k connects mass 2k (+1) and mass 2k+1 (-1).
+    F = np.zeros((n, n_springs))
+    for k in range(n_springs):
+        F[2 * k,     k] =  1.0
+        F[2 * k + 1, k] = -1.0
 
-    # L_6 = F @ F^T  (the graph Laplacian of the spring network)
-    L6 = F @ F.T
+    # L = F @ F^T  (graph Laplacian of the spring network)
+    L = F @ F.T
 
-    I6 = np.eye(n)
-    O6 = np.zeros((n, n))
+    In = np.eye(n)
+    On = np.zeros((n, n))
 
-    # A_c = [[0_6,                          I_6                    ],
-    #        [a*I_6 + c*L_6 + c*L_6^T,   b*I_6 + d*L_6 + d*L_6^T]]
-    A_top = np.hstack([O6, I6])
-    A_bot = np.hstack([a * I6 + c * L6 + c * L6.T,
-                       b * I6 + d * L6 + d * L6.T])
+    # A_c = [[0_n,                        I_n                  ],
+    #        [a*I_n + c*L + c*L^T,   b*I_n + d*L + d*L^T]]
+    A_top = np.hstack([On, In])
+    A_bot = np.hstack([a * In + c * L + c * L.T,
+                       b * In + d * L + d * L.T])
     A_c = np.vstack([A_top, A_bot])
 
-    # B_c = [[0], [F]]  where F is 6x3
-    B_c = np.vstack([np.zeros((n, 3)), F])
+    # B_c = [[0], [F]]
+    B_c = np.vstack([np.zeros((n, n_springs)), F])
 
     return A_c, B_c, F
 
@@ -176,12 +179,12 @@ def discretize_euler(A_c, B_c, dt):
     return A_d, B_d
 
 
-def _add_mpc_kkt(M, tag, T, n_x, n_u, A_d, B_d, Q, R, u_max, x_init):
+def _add_mpc_kkt(M, tag, T, n_x, n_u, A_d, B_d, Q, R, u_max, x_init, big_M=1e3):
     """
     Add variables and KKT constraints for one T-horizon linear MPC problem.
 
     MPC (convex QP):
-        min  sum_{t=0}^{T} x_t^T Q x_t + sum_{t=0}^{T-1} u_t^T R u_t
+        min  (1/2)(sum_{t=0}^{T} x_t^T Q x_t + sum_{t=0}^{T-1} u_t^T R u_t)
         s.t. x_{t+1} = A_d x_t + B_d u_t
              -u_max <= u_t <= u_max
 
@@ -190,9 +193,13 @@ def _add_mpc_kkt(M, tag, T, n_x, n_u, A_d, B_d, Q, R, u_max, x_init):
         Terminal:      lam[T]  = Q x_T
         Costate:       lam[t]  = Q x_t + A_d^T lam[t+1]    (fully linear)
         Stationarity:  R u_t + B_d^T lam[t+1] + nu_up[t] - nu_lo[t] = 0
-        Complementarity (bilinear):
-                       nu_up[t] * (u_t - u_max) = 0
-                       nu_lo[t] * (-u_max - u_t) = 0
+        Complementarity (Big-M MIP):
+            z_up[t][j] in {0,1}:
+                nu_up[t][j]          <= big_M * z_up[t][j]
+                u_max - u_t[j]       <= 2*u_max * (1 - z_up[t][j])
+            z_lo[t][j] in {0,1}:
+                nu_lo[t][j]          <= big_M * z_lo[t][j]
+                u_max + u_t[j]       <= 2*u_max * (1 - z_lo[t][j])
 
     Returns x_traj, u_traj (dicts keyed by time index t).
     """
@@ -204,6 +211,8 @@ def _add_mpc_kkt(M, tag, T, n_x, n_u, A_d, B_d, Q, R, u_max, x_init):
                for t in range(T + 1)}
     nu_up  = {t: M.addVars(n_u, lb=0.0, name=f"nup_{tag}_{t}") for t in range(T)}
     nu_lo  = {t: M.addVars(n_u, lb=0.0, name=f"nlo_{tag}_{t}") for t in range(T)}
+    z_up   = {t: M.addVars(n_u, vtype=GRB.BINARY, name=f"zup_{tag}_{t}") for t in range(T)}
+    z_lo   = {t: M.addVars(n_u, vtype=GRB.BINARY, name=f"zlo_{tag}_{t}") for t in range(T)}
 
     # Initial condition
     for i in range(n_x):
@@ -248,20 +257,28 @@ def _add_mpc_kkt(M, tag, T, n_x, n_u, A_d, B_d, Q, R, u_max, x_init):
                 name=f"stat_{tag}_{t}_{j}"
             )
 
-    # Complementarity (only nonlinearity in the convex-QP KKT)
+    # Big-M complementarity (replaces bilinear nu * slack = 0)
+    # Upper bound: nu_up[t][j] > 0  =>  u_t[j] = u_max  (z_up = 1)
+    #              u_t[j] < u_max   =>  nu_up[t][j] = 0  (z_up = 0)
+    # Lower bound: nu_lo[t][j] > 0  =>  u_t[j] = -u_max (z_lo = 1)
+    #              u_t[j] > -u_max  =>  nu_lo[t][j] = 0  (z_lo = 0)
     for t in range(T):
         for j in range(n_u):
-            M.addConstr(nu_up[t][j] * (u_traj[t][j] - u_max) == 0,
-                        name=f"cup_{tag}_{t}_{j}")
-            M.addConstr(nu_lo[t][j] * (-u_max - u_traj[t][j]) == 0,
-                        name=f"clo_{tag}_{t}_{j}")
+            M.addConstr(nu_up[t][j]          <= big_M * z_up[t][j],
+                        name=f"cup_nu_{tag}_{t}_{j}")
+            M.addConstr(u_max - u_traj[t][j] <= 2 * u_max * (1 - z_up[t][j]),
+                        name=f"cup_u_{tag}_{t}_{j}")
+            M.addConstr(nu_lo[t][j]          <= big_M * z_lo[t][j],
+                        name=f"clo_nu_{tag}_{t}_{j}")
+            M.addConstr(u_max + u_traj[t][j] <= 2 * u_max * (1 - z_lo[t][j]),
+                        name=f"clo_u_{tag}_{t}_{j}")
 
     return x_traj, u_traj
 
 
 def _mpc_cost(x_traj, u_traj, T, n_x, n_u, Q, R):
-    """MPC cost: sum_{t=0}^T x_t^T Q x_t + sum_{t=0}^{T-1} u_t^T R u_t."""
-    return (
+    """MPC cost: (1/2)(sum_{t=0}^T x_t^T Q x_t + sum_{t=0}^{T-1} u_t^T R u_t)."""
+    return 0.5 * (
         gp.quicksum(Q[i, i] * x_traj[t][i] * x_traj[t][i]
                     for t in range(T + 1) for i in range(n_x))
         + gp.quicksum(R[j, j] * u_traj[t][j] * u_traj[t][j]
@@ -278,18 +295,19 @@ class SpringMassPhase1:
     so we can enforce them as equality/complementarity constraints without
     losing any optimal solutions.
 
-    The only nonlinearity in the KKT is complementarity (bilinear), handled
-    via NonConvex=2.  The costate recursion is fully linear.
+    Complementarity is enforced via Big-M MIP (binary variables).
+    NonConvex=2 is still required for the quadratic (non-convex) objective.
+    The costate recursion is fully linear.
     """
 
     def __init__(self, T, A_d, B_d, Q, R, u_max, x_lo, x_hi,
-                 verbose=True, time_limit=None):
+                 verbose=True, time_limit=None, big_M=1e3):
         n_x = A_d.shape[0]
         n_u = B_d.shape[1]
 
         M = gp.Model("spring_mass_phase1")
         M.Params.OutputFlag = 1 if verbose else 0
-        M.Params.NonConvex  = 2
+        M.Params.NonConvex  = 2   # needed: maximizing a convex quadratic
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
         self.model = M
@@ -298,7 +316,7 @@ class SpringMassPhase1:
 
         x_traj, u_traj = _add_mpc_kkt(
             M, tag="p1", T=T, n_x=n_x, n_u=n_u,
-            A_d=A_d, B_d=B_d, Q=Q, R=R, u_max=u_max, x_init=x0
+            A_d=A_d, B_d=B_d, Q=Q, R=R, u_max=u_max, x_init=x0, big_M=big_M
         )
 
         V0 = _mpc_cost(x_traj, u_traj, T, n_x, n_u, Q, R)
@@ -330,19 +348,19 @@ class SpringMassVerify:
       - KKT conditions are both necessary and sufficient for optimality.
       - The costate recursion is fully linear (linear dynamics => no bilinear
         adjoint products).
-      - The only nonlinearity is complementarity (bilinear), handled via
-        NonConvex=2.
+      - Complementarity is enforced via Big-M MIP (binary variables).
+      - NonConvex=2 is still required for the quadratic Lyapunov constraint.
     """
 
     def __init__(self, K, T, A_d, B_d, Q, R, u_max, x_lo, x_hi, rho,
-                 verbose=True, time_limit=None, V_0_max=None):
+                 verbose=True, time_limit=None, V_0_max=None, big_M=1e3):
         self.K = K
         n_x = A_d.shape[0]
         n_u = B_d.shape[1]
 
         M = gp.Model("spring_mass_verify")
         M.Params.OutputFlag = 1 if verbose else 0
-        M.Params.NonConvex  = 2
+        M.Params.NonConvex  = 2   # needed: quadratic Lyapunov constraint
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
         self.model = M
@@ -361,7 +379,8 @@ class SpringMassVerify:
         for k in range(K + 1):
             xt, ut = _add_mpc_kkt(
                 M, tag=f"cl{k}", T=T, n_x=n_x, n_u=n_u,
-                A_d=A_d, B_d=B_d, Q=Q, R=R, u_max=u_max, x_init=x[k]
+                A_d=A_d, B_d=B_d, Q=Q, R=R, u_max=u_max, x_init=x[k],
+                big_M=big_M
             )
             x_traj[k] = xt
             u_traj[k] = ut
@@ -381,6 +400,10 @@ class SpringMassVerify:
                     name=f"cldyn_{k}_{i}"
                 )
 
+        self.x = x
+        self.u = u
+        self.u_traj = u_traj   # full MPC input sequences: u_traj[k][t][j]
+
         # Lyapunov values: V(x[0]) and V(x[K])
         V_curr = _mpc_cost(x_traj[0], u_traj[0], T, n_x, n_u, Q, R)
         V_next = _mpc_cost(x_traj[K], u_traj[K], T, n_x, n_u, Q, R)
@@ -390,7 +413,7 @@ class SpringMassVerify:
         # Restrict search to the Phase-1 bound on V(x_0)
         if V_0_max is not None:
             M.addConstr(V_curr <= V_0_max, name="V0_bound")
-            M.addConstr(V_curr >= 1e-2, name="V0_bound2")
+            M.addConstr(V_curr >= 1, name="V0_bound2")
 
         # Counterexample constraint: V_next >= rho * V_curr
         # Infeasibility of this problem => stability verified at rate rho.
@@ -399,7 +422,7 @@ class SpringMassVerify:
                     name="lyap_violation")
 
         M.setObjective(0, GRB.MAXIMIZE)
-        # M.setObjective(V_next - V_curr, GRB.MAXIMIZE)
+        # M.setObjective(V_next - V_curr + eps * V_curr, GRB.MAXIMIZE)
 
     def solve(self):
         self.model.optimize()
@@ -408,10 +431,22 @@ class SpringMassVerify:
     def solution_dict(self):
         if self.model.SolCount == 0:
             return {"obj": None}
+        n_u = len(self.u[0])
+        T   = len(self.u_traj[0])
         return {
             "obj":    self.model.ObjVal,
             "V_curr": self.V_curr.getValue(),
             "V_next": self.V_next.getValue(),
+            # closed-loop state trajectory: x[k] in R^{n_x}, k=0..K
+            "x": {k: {i: self.x[k][i].X for i in range(len(self.x[k]))}
+                  for k in range(self.K + 1)},
+            # applied controls (receding-horizon first action): u[k] in R^{n_u}, k=0..K-1
+            "u": {k: {j: self.u[k][j].X for j in range(n_u)}
+                  for k in range(self.K)},
+            # full MPC input sequences: u_traj[k][t] in R^{n_u}, k=0..K, t=0..T-1
+            "u_traj": {k: {t: {j: self.u_traj[k][t][j].X for j in range(n_u)}
+                           for t in range(T)}
+                       for k in range(self.K + 1)},
         }
 
 

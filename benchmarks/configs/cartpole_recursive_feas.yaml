@@ -1,11 +1,11 @@
-j_vals: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
-T_vals: [4]
-dt: 0.1
-r_cost: 0.0 #0.1          # control cost in true MPC chain
+j_vals: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] #[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+T_vals: [2, 4, 5]
+dt: 0.1 #0.05 #0.1
+r_cost: 0 # 0.01 #1 #0.1          # control cost in true MPC chain
 feas_tol: 1.0e-4     # threshold for certifying r=0
 time_limit: 300
-x0_mins: [-0.5]      # initial set X_0
-x0_maxes: [0.5]
+x0_mins: [-0.9]      # initial set X_0
+x0_maxes: [0.9]
 x_feas_mins: [-1.0]  # feasibility region X_feas (can differ from X_0)
 x_feas_maxes: [1.0]
 u_bound: 10

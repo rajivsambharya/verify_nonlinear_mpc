@@ -55,17 +55,17 @@ def run(cfg):
             )
 
             # --- Problem 1: recursive feasibility (max violation r) ---
-            # print(f"\n=== Feas: j={j}, T={T} ===")
-            # cert = CartpoleRecursiveFeas(**common_kwargs)
-            # status_f, t_f = cert.solve()
-            # sol_f = cert.solution_dict()
-            # r_opt = sol_f['r_opt']
-            # certified = r_opt is not None and r_opt <= feas_tol
-            # feas_results[(T, j)] = {'certified': certified, 'r_opt': r_opt,
-            #                          'status': status_f, 'time': t_f}
-            # print(f"  r_opt={r_opt}  {'CERTIFIED' if certified else 'FAIL'}")
-            # import pdb
-            # pdb.set_trace()
+            print(f"\n=== Feas: j={j}, T={T} ===")
+            cert = CartpoleRecursiveFeas(**common_kwargs)
+            status_f, t_f = cert.solve()
+            sol_f = cert.solution_dict()
+            r_opt = sol_f['r_opt']
+            certified = r_opt is not None and r_opt <= feas_tol
+            feas_results[(T, j)] = {'certified': certified, 'r_opt': r_opt,
+                                     'status': status_f, 'time': t_f}
+            print(f"  r_opt={r_opt}  {'CERTIFIED' if certified else 'FAIL'}")
+            import pdb
+            pdb.set_trace()
 
             # --- Problem 2: max ||x_j||_inf ---
             print(f"=== Norm: j={j}, T={T} ===")
