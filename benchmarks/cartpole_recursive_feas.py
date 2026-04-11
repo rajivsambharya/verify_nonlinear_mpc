@@ -38,7 +38,6 @@ def run(cfg):
     x_feas_hi = cfg.x_feas_maxes[0]
     u_bound = cfg.u_bound
     feas_tol = cfg.feas_tol
-    trust_delta = getattr(cfg, 'trust_delta', None)
 
     # Store results indexed by (T, j)
     feas_results = {}   # r_opt
@@ -67,7 +66,7 @@ def run(cfg):
             # print(f"  r_opt={r_opt}  {'CERTIFIED' if certified else 'FAIL'}")
             # --- Problem 2: max ||x_j||_inf (SCP-based, linearized QP KKT) ---
             print(f"=== Norm (SCP): j={j}, T={T} ===")
-            norm_prob = CartpoleMaxNormSCP(**common_kwargs, delta=trust_delta)
+            norm_prob = CartpoleMaxNormSCP(**common_kwargs)
             status_n, t_n = norm_prob.solve()
             sol_n = norm_prob.solution_dict()
             norm_results[(T, j)] = {'inf_norm': sol_n['inf_norm'],
@@ -224,8 +223,7 @@ def _add_true_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
 # ---------------------------------------------------------------------------
 
 def _add_linear_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
-                           x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound,
-                           delta=None):
+                           x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound):
     """
     Add j steps of the SCP-linearized MPC chain to model M.
 
@@ -236,12 +234,10 @@ def _add_linear_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
         min  (1/2) sum_t [ x_t^T Q x_t + u_t^T R u_t ]
         s.t. x_{t+1} = A_k x_t + B0 u_t + c_k   (linearized at x_chain[k], u=0)
              x_0     = x_chain[k]
-             x_t     in [x_feas_lo, x_feas_hi]   t=1..T
-             u_t     in [-u_bound, u_bound]
-             ||x_t - x_chain[k]||_inf <= delta    t=1..T   (if delta not None)
-             ||u_t||_inf              <= delta    t=0..T-1 (if delta not None)
+             x_t     ∈ [x_feas_lo, x_feas_hi]    t=1..T
+             u_t     ∈ [-u_bound, u_bound]
 
-    Full KKT (necessary AND sufficient) is embedded, with duals for all constraints.
+    Full KKT (necessary AND sufficient) embedded; boundedness comes from control bounds.
 
     Returns (x_chain, u_chain).
     """
@@ -254,14 +250,13 @@ def _add_linear_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
     u_chain = {}
     x_chain[0] = M.addVars(n_x, lb=x0_lo, ub=x0_hi, name="xl_0")
     for t in range(1, j + 1):
-        # Fully determined by dynamics + policy; no bounds.
         x_chain[t] = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"xl_{t}")
 
     for k in range(j):
         u_k = M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"ul_{k}")
         u_chain[k] = u_k
 
-        # sin / cos of x_chain[k][0] — used for linearization and chain propagation
+        # sin / cos of x_chain[k][0] — linearization point and chain propagation
         sin_k = M.addVar(lb=-1.0, ub=1.0, name=f"lsin_{k}")
         cos_k = M.addVar(lb=-1.0, ub=1.0, name=f"lcos_{k}")
         M.addGenConstrSin(x_chain[k][0], sin_k, name=f"lsinc_{k}")
@@ -271,32 +266,23 @@ def _add_linear_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
                for t in range(T + 1)}
         u_m = {t: M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"ulm_{k}_{t}")
                for t in range(T)}
-        # Costates for t=1..T (x_0 fixed by IC; no stationarity at t=0)
-        lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"laml_{k}_{t}")
-               for t in range(1, T + 1)}
+        # Costates t=1..T (x_0 fixed by IC; no stationarity at t=0)
+        lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"laml_{k}_{t}")
+                 for t in range(1, T + 1)}
         mu_up = {t: M.addVar(lb=0.0, name=f"mup_{k}_{t}") for t in range(T)}
         mu_lo = {t: M.addVar(lb=0.0, name=f"mlo_{k}_{t}") for t in range(T)}
-
-        # Duals for x_feas state constraints: x_m[t] ∈ [x_feas_lo, x_feas_hi], t=1..T
+        # Duals for x_feas constraints: x_m[t] ∈ [x_feas_lo, x_feas_hi], t=1..T
         xi_up = {t: M.addVars(n_x, lb=0.0, name=f"xi_up_{k}_{t}") for t in range(1, T + 1)}
         xi_lo = {t: M.addVars(n_x, lb=0.0, name=f"xi_lo_{k}_{t}") for t in range(1, T + 1)}
 
-        # Trust region duals (only when delta is set)
-        if delta is not None:
-            nu_up  = {t: M.addVars(n_x, lb=0.0, name=f"nu_up_{k}_{t}") for t in range(1, T + 1)}
-            nu_lo  = {t: M.addVars(n_x, lb=0.0, name=f"nu_lo_{k}_{t}") for t in range(1, T + 1)}
-            eta_up = {t: M.addVar(lb=0.0, name=f"eta_up_{k}_{t}") for t in range(T)}
-            eta_lo = {t: M.addVar(lb=0.0, name=f"eta_lo_{k}_{t}") for t in range(T)}
-
-        # Initial condition: x_m[0] = x_chain[k]
+        # Initial condition
         for i in range(n_x):
             M.addConstr(x_m[0][i] == x_chain[k][i], name=f"lmic_{k}_{i}")
 
-        # Linearized dynamics:
+        # Linearized dynamics (bilinear in cos_k; handled by NonConvex=2):
         #   x_m[t+1][0] = x_m[t][0] + dt * x_m[t][1]
-        #   x_m[t+1][1] = dt*g/L*cos_k*x_m[t][0] + x_m[t][1] + B0_1*u_m[t][0]
-        #                + dt*g/L*(sin_k - cos_k*x_chain[k][0])   ← affine offset
-        # Bilinear terms (cos_k*x_m, cos_k*x_chain[k][0]) handled by NonConvex=2.
+        #   x_m[t+1][1] = gdtL*cos_k*x_m[t][0] + x_m[t][1] + B0_1*u_m[t][0]
+        #                + gdtL*(sin_k - cos_k*x_chain[k][0])   ← affine offset
         gdtL = g * dt / length
         for t in range(T):
             M.addConstr(
@@ -317,79 +303,46 @@ def _add_linear_mpc_chain(M, j, T, r_cost, dt, mass, length, g,
                 M.addConstr(x_m[t][i] <= x_feas_hi, name=f"xf_hi_{k}_{t}_{i}")
 
         # -----------------------------------------------------------
-        # KKT conditions for the linearized QP
-        # Dual contributions per constraint type:
-        #   xi_up[t][i]:  x_m[t][i] <= x_feas_hi   → subtract xi_up
-        #   xi_lo[t][i]:  x_m[t][i] >= x_feas_lo   → add    xi_lo
-        #   nu_up[t][i]:  x_m[t][i] <= x_chain[k][i] + delta → subtract nu_up  (if delta)
-        #   nu_lo[t][i]:  x_m[t][i] >= x_chain[k][i] - delta → add    nu_lo    (if delta)
+        # KKT conditions (necessary AND sufficient for convex QP)
+        # Sign convention: xi_up subtracts (upper bound), xi_lo adds (lower bound)
         # -----------------------------------------------------------
-        # Terminal costate: lam[T][i] = Q x_m[T][i] - xi_up[T][i] + xi_lo[T][i] [±nu]
+        # Terminal: lam[T][i] = Q x_m[T][i] - xi_up[T][i] + xi_lo[T][i]
         for i in range(n_x):
-            rhs = Q[i, i] * x_m[T][i] - xi_up[T][i] + xi_lo[T][i]
-            if delta is not None:
-                rhs = rhs - nu_up[T][i] + nu_lo[T][i]
-            M.addConstr(lam[T][i] == rhs, name=f"ltc_{k}_{i}")
+            M.addConstr(lam[T][i] == Q[i, i] * x_m[T][i] - xi_up[T][i] + xi_lo[T][i],
+                        name=f"ltc_{k}_{i}")
 
-        # Backward costate: lam[t] = Q x_m[t] + A_k^T lam[t+1] - xi_up[t] + xi_lo[t] [±nu]
-        #   A_k^T[0,:] = [1, gdtL*cos_k],  A_k^T[1,:] = [dt, 1]
+        # Backward: lam[t] = Q x_m[t] + A_k^T lam[t+1] - xi_up[t] + xi_lo[t]
+        #   A_k^T = [[1, gdtL*cos_k], [dt, 1]]
         for t in range(T - 1, 0, -1):
-            rhs0 = (Q[0, 0] * x_m[t][0]
-                    + lam[t + 1][0]
-                    + gdtL * cos_k * lam[t + 1][1]
-                    - xi_up[t][0] + xi_lo[t][0])
-            rhs1 = (Q[1, 1] * x_m[t][1]
-                    + dt * lam[t + 1][0]
-                    + lam[t + 1][1]
-                    - xi_up[t][1] + xi_lo[t][1])
-            if delta is not None:
-                rhs0 = rhs0 - nu_up[t][0] + nu_lo[t][0]
-                rhs1 = rhs1 - nu_up[t][1] + nu_lo[t][1]
-            M.addConstr(lam[t][0] == rhs0, name=f"lcs0_{k}_{t}")
-            M.addConstr(lam[t][1] == rhs1, name=f"lcs1_{k}_{t}")
+            M.addConstr(
+                lam[t][0] == Q[0, 0] * x_m[t][0]
+                             + lam[t + 1][0]
+                             + gdtL * cos_k * lam[t + 1][1]
+                             - xi_up[t][0] + xi_lo[t][0],
+                name=f"lcs0_{k}_{t}")
+            M.addConstr(
+                lam[t][1] == Q[1, 1] * x_m[t][1]
+                             + dt * lam[t + 1][0]
+                             + lam[t + 1][1]
+                             - xi_up[t][1] + xi_lo[t][1],
+                name=f"lcs1_{k}_{t}")
 
-        # Stationarity w.r.t. u_t:
-        #   R u_t + B0^T lam[t+1] + mu_up - mu_lo [+ eta_up - eta_lo] = 0
+        # Stationarity w.r.t. u_t: R u_t + B0^T lam[t+1] + mu_up - mu_lo = 0
         for t in range(T):
-            stat = (R[0, 0] * u_m[t][0]
-                    + B0_1 * lam[t + 1][1]
-                    + mu_up[t] - mu_lo[t])
-            if delta is not None:
-                stat = stat + eta_up[t] - eta_lo[t]
-            M.addConstr(stat == 0, name=f"lstat_{k}_{t}")
+            M.addConstr(
+                R[0, 0] * u_m[t][0] + B0_1 * lam[t + 1][1] + mu_up[t] - mu_lo[t] == 0,
+                name=f"lstat_{k}_{t}")
 
-        # Complementarity for control bound
+        # Complementarity: control bounds
         for t in range(T):
             M.addConstr(mu_up[t] * (u_bound - u_m[t][0]) == 0, name=f"lcu_{k}_{t}")
             M.addConstr(mu_lo[t] * (u_bound + u_m[t][0]) == 0, name=f"lcl_{k}_{t}")
 
-        # Complementarity for x_feas constraints
+        # Complementarity: x_feas constraints
         for t in range(1, T + 1):
             for i in range(n_x):
                 M.addConstr(xi_up[t][i] * (x_feas_hi - x_m[t][i]) == 0, name=f"xfc_up_{k}_{t}_{i}")
                 M.addConstr(xi_lo[t][i] * (x_m[t][i] - x_feas_lo) == 0, name=f"xfc_lo_{k}_{t}_{i}")
-
-        # Trust region: primal bounds + complementarity
-        if delta is not None:
-            for t in range(1, T + 1):
-                for i in range(n_x):
-                    M.addConstr(x_m[t][i] >= x_chain[k][i] - delta, name=f"tr_xlo_{k}_{t}_{i}")
-                    M.addConstr(x_m[t][i] <= x_chain[k][i] + delta, name=f"tr_xhi_{k}_{t}_{i}")
-                    # nu_up*(x_chain[k][i] + delta - x_m[t][i]) = 0  (quadratic)
-                    M.addConstr(
-                        nu_up[t][i] * x_chain[k][i] - nu_up[t][i] * x_m[t][i]
-                        + delta * nu_up[t][i] == 0,
-                        name=f"tr_cup_{k}_{t}_{i}")
-                    # nu_lo*(x_m[t][i] - x_chain[k][i] + delta) = 0  (quadratic)
-                    M.addConstr(
-                        nu_lo[t][i] * x_m[t][i] - nu_lo[t][i] * x_chain[k][i]
-                        + delta * nu_lo[t][i] == 0,
-                        name=f"tr_clo_{k}_{t}_{i}")
-            for t in range(T):
-                M.addConstr(u_m[t][0] >= -delta, name=f"tr_ulo_{k}_{t}")
-                M.addConstr(u_m[t][0] <= delta,  name=f"tr_uhi_{k}_{t}")
-                M.addConstr(eta_up[t] * (delta - u_m[t][0]) == 0, name=f"tr_eup_{k}_{t}")
-                M.addConstr(eta_lo[t] * (delta + u_m[t][0]) == 0, name=f"tr_elo_{k}_{t}")
 
         # Link: applied control is first MPC control
         M.addConstr(u_k[0] == u_m[0][0], name=f"llink_{k}")
@@ -908,7 +861,7 @@ class CartpoleMaxNormSCP:
 
     def __init__(self, j=0, T=5, r_cost=0.1, dt=0.1, mass=1, length=1, g=9.8,
                  x0_lo=-1.0, x0_hi=1.0, x_feas_lo=-1.0, x_feas_hi=1.0,
-                 u_bound=10.0, delta=None, verbose=True, time_limit=None):
+                 u_bound=10.0, verbose=True, time_limit=None):
         self.j = j
         n_x = 2
         self._subs = []
@@ -925,8 +878,7 @@ class CartpoleMaxNormSCP:
                     M.Params.TimeLimit = time_limit
                 xc, uc = _add_linear_mpc_chain(
                     M, j, T, r_cost, dt, mass, length, g,
-                    x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound,
-                    delta=delta)
+                    x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
                 M.setObjective(sign * xc[j][i], GRB.MAXIMIZE)
                 self._subs.append((M, xc, uc, i, sign))
 

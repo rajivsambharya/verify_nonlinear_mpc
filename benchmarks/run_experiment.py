@@ -11,6 +11,7 @@ import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
 import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
 import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.spring_masses as spring_masses
+import benchmarks.cartpole_constrained_stability_scp as cartpole_constrained_stability_scp
 
 
 import matplotlib
@@ -60,6 +61,11 @@ def main_run_stir_tank_subopt(cfg):
 @hydra.main(config_path='configs', config_name='spring_masses.yaml')
 def main_run_spring_masses(cfg):
     spring_masses.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_constrained_stability_scp.yaml')
+def main_run_cartpole_constrained_stability_scp(cfg):
+    cartpole_constrained_stability_scp.run(cfg)
 
 
 # @hydra.main(config_path='configs', config_name='power_converter.yaml')
@@ -148,6 +154,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'spring_masses/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_spring_masses()
+    elif sys.argv[1] == 'cartpole_constrained_stability_scp':
+        sys.argv[1] = base + 'cartpole_constrained_stability_scp/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_constrained_stability_scp()
     elif sys.argv[1] == 'sparse_coding':
         sys.argv[1] = base + 'sparse_coding/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
