@@ -20,13 +20,14 @@ plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
 
 def run(cfg):
     """
-    Recursive feasibility certification for SCP-linearized MPC on the bilinear system:
+    Closed-loop suboptimality for the bilinear system:
       x+[0] = 0.9*x[0] + u + 0.2*u*x[0]
       x+[1] = 0.7*x[1] + 0.5*x[0]
 
-    Uses the Farkas lemma to search for the most problematic initial state x_0 in X_0.
-    If the Farkas objective > 0, there exists an x_0 causing infeasibility of the
-    SCP QP at step j.  If <= 0, feasibility is certified for all x_0 in X_0.
+    For each j and T, computes max_{x_0 in X_0} [J_policy(x_0) - J_opt(x_0)]
+    for two policies:
+      1. True nonlinear MPC (exact KKT)
+      2. 1-iteration SCP MPC (linearize at current state, u_lin=0)
     """
     j_vals = list(cfg.j_vals)
     T_vals = list(cfg.T_vals)
@@ -36,10 +37,9 @@ def run(cfg):
     x_feas_lo = cfg.x_feas_mins[0]
     x_feas_hi = cfg.x_feas_maxes[0]
     u_bound = cfg.u_bound
-    feas_tol = cfg.feas_tol
 
-    farkas_results = {}
-    norm_results = {}
+    mpc_results = {}
+    scp_results = {}
 
     for T in T_vals:
         for j in j_vals:
@@ -51,56 +51,74 @@ def run(cfg):
                 time_limit=cfg.time_limit,
             )
 
-            # Max closed-loop suboptimality
-            print(f"=== closed-loop suboptimality: j={j}, T={T} ===")
-            norm_prob = BilinearMaxStateNorm(**common_kwargs)
-            status_n, t_n = norm_prob.solve()
-            sol_n = norm_prob.solution_dict()
-            norm_results[(T, j)] = {
-                'inf_norm': sol_n['inf_norm'],
-                'status': status_n, 'time': t_n,
-            }
-            print(f"  ||x_j||_inf={sol_n['inf_norm']}")
+            # True MPC suboptimality
+            print(f"=== True MPC suboptimality: j={j}, T={T} ===")
+            mpc_prob = BilinearMaxStateNorm(**common_kwargs)
+            status_m, t_m = mpc_prob.solve()
+            sol_m = mpc_prob.solution_dict()
+            mpc_results[(T, j)] = {'subopt': sol_m['subopt'], 'status': status_m, 'time': t_m}
+            print(f"  subopt={sol_m['subopt']}")
+
+            # SCP suboptimality
+            print(f"=== SCP suboptimality: j={j}, T={T} ===")
+            scp_prob = BilinearSCPSubopt(**common_kwargs)
+            status_s, t_s = scp_prob.solve()
+            sol_s = scp_prob.solution_dict()
+            scp_results[(T, j)] = {'subopt': sol_s['subopt'], 'status': status_s, 'time': t_s}
+            print(f"  subopt={sol_s['subopt']}")
 
     # Summary
     print("\n=== Summary ===")
     for T in T_vals:
         for j in j_vals:
-            # rf = farkas_results[(T, j)]
-            rn = norm_results[(T, j)]
-            # if rf['certified']:
-            #     tag = "OK"
-            # elif rf['farkas_obj'] is not None:
-            #     tag = f"FAIL(obj={rf['farkas_obj']:.2e})"
-            # else:
-            #     tag = "FAIL(N/A)"
-            norm_str = f"{rn['inf_norm']:.4f}" if rn['inf_norm'] is not None else "N/A"
-            # print(f"  T={T}, j={j}: {tag}  ||x_j||_inf={norm_str}")
+            m = mpc_results[(T, j)]
+            s = scp_results[(T, j)]
+            m_str = f"{m['subopt']:.4f}" if m['subopt'] is not None else "N/A"
+            s_str = f"{s['subopt']:.4f}" if s['subopt'] is not None else "N/A"
+            print(f"  T={T}, j={j}: MPC={m_str}  SCP={s_str}")
 
     j_axis = list(j_vals)
 
-
-    # Plot 2: max ||x_j||_inf vs j
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     for ti, T in enumerate(T_vals):
-        norm_vals = [
-            norm_results[(T, j)]['inf_norm']
-            if norm_results[(T, j)]['inf_norm'] is not None else float('nan')
-            for j in j_vals
+        mpc_vals = [
+            mpc_results[(T, j)]['subopt'] if mpc_results[(T, j)]['subopt'] is not None
+            else float('nan') for j in j_vals
         ]
-        ax2.plot(j_axis[1:], norm_vals[1:],
-                 marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
-                 label=f'T={T}')
-    # import pdb; pdb.set_trace()
-    ax2.set_xlabel('step $j$')
-    ax2.set_yscale('log')
-    ax2.set_ylabel('closed-loop suboptimality')
-    ax2.legend()
-    ax2.grid(True)
-    fig2.tight_layout()
-    fig2.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
-    plt.close(fig2)
+        scp_vals = [
+            scp_results[(T, j)]['subopt'] if scp_results[(T, j)]['subopt'] is not None
+            else float('nan') for j in j_vals
+        ]
+        color = colors[ti % len(colors)]
+        ax.plot(j_axis[1:], mpc_vals[1:],
+                marker=markers[ti % len(markers)], linewidth=2, color=color,
+                linestyle='-', label=f'MPC T={T}')
+        ax.plot(j_axis[1:], scp_vals[1:],
+                marker=markers[ti % len(markers)], linewidth=2, color=color,
+                linestyle='--', label=f'SCP T={T}')
+    ax.set_xlabel('step $j$')
+    ax.set_yscale('log')
+    ax.set_ylabel('closed-loop suboptimality')
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
+    plt.close(fig)
 
+
+# ---------------------------------------------------------------------------
+# Bilinear system constants
+#   x+[0] = 0.9*x[0] + u + 0.2*u*x[0]
+#   x+[1] = 0.7*x[1] + 0.5*x[0]
+# SCP linearizes at (x_k, u=0):
+#   A = [[0.9, 0], [0.5, 0.7]]   (constant)
+#   B(x_k) = [[1 + 0.2*x_k[0]], [0]]   (depends on x_k[0])
+#
+# Steady-state gain x[1]/x[0] = 0.5/(1-0.7) = 1.67, within x_feas=2.
+# ---------------------------------------------------------------------------
+
+# A_LIN = np.array([[0.9, 0.0], [0.5, 0.7]])   # constant A
+# A^T = [[0.9, 0.5], [0.0, 0.7]]
 
 
 def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound):
@@ -115,12 +133,13 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
     x_chain[0] in [x0_lo, x0_hi]^2.
     x_chain[1..j] bounded in [x_feas_lo, x_feas_hi]^2.
 
-    Returns x_chain (dict 0..j).
+    Returns (x_chain, u_chain) where u_chain[k] is the applied control at step k.
     """
     n_x, n_u = 2, 1
     Q = np.eye(n_x)
 
     x_chain = {}
+    u_chain = {}
     x_chain[0] = M.addVars(n_x, lb=x0_lo, ub=x0_hi, name="xc_0")
 
     for k in range(j):
@@ -203,6 +222,7 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
         # True nonlinear chain dynamics: x_chain[k+1] = f_true(x_chain[k], u_k)
         # u_k = u_m[0][0]
         u_k = u_m[0][0]
+        u_chain[k] = u_k
         x_chain[k+1] = M.addVars(n_x, lb=x_feas_lo, ub=x_feas_hi, name=f"xc_{k+1}")
         M.addConstr(
             x_chain[k+1][0] == 0.9*x_k[0] + u_k + 0.2*u_k*x_k[0],
@@ -211,7 +231,7 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
             x_chain[k+1][1] == 0.7*x_k[1] + 0.5*x_k[0],
             name=f"chain_dyn1_{k}")
 
-    return x_chain
+    return x_chain, u_chain
 
 
 
@@ -427,10 +447,78 @@ class BilinearMaxStateNorm:
             #     best_xc = xc
             #     best_uc = uc
         if best_val is None:
-            return {'inf_norm': None}
-        return {
-            'inf_norm': best_val,
-            # 'x_chain': {k: {idx: best_xc[k][idx].X for idx in range(2)}
-            #             for k in range(self.j + 1)},
-            # 'u_chain': {k: best_uc[k][0].X for k in range(self.j)},
-        }
+            return {'subopt': None}
+        return {'subopt': best_val}
+
+
+# ---------------------------------------------------------------------------
+# SCP closed-loop suboptimality: max J_scp(x_0) - J_opt(x_0)
+# ---------------------------------------------------------------------------
+
+class BilinearSCPSubopt:
+    """
+    Outer problem: max_{x_0 in X_0} [J_scp(x_0) - J_opt(x_0)]
+
+    J_scp:  j-step cost under 1-iter SCP policy (linearize at x_k, u_lin=0)
+    J_opt:  j-step cost under optimal (true nonlinear MPC) policy
+
+    Both policies propagate true nonlinear dynamics.
+    The SCP inner QP is convex (linearized dynamics, fixed x_k) and its KKT
+    conditions are linear in inner variables — bilinear terms arise only
+    from x_k being an outer variable.
+    """
+
+    def __init__(self, j=0, T=5, r_cost=0.1,
+                 x0_lo=-1.0, x0_hi=1.0, x_feas_lo=-2.0, x_feas_hi=2.0,
+                 u_bound=1.0, verbose=True, time_limit=None):
+        self.j = j
+        n_x, n_u = 2, 1
+
+        M = gp.Model("bilinear_scp_subopt")
+        M.Params.OutputFlag = 1 if verbose else 0
+        M.Params.FeasibilityTol = 1e-9
+        M.Params.NonConvex = 2
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        M.setParam('BestBdStop', 1e-5)
+        self.model = M
+
+        # --- SCP chain: x_scp[0..j], u_scp[0..j-1] via SCP KKT ---
+        x_scp, u_scp = _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
+
+        # --- Optimal chain: same x_scp[0] as initial state, separate dynamics ---
+        x_opt = {0: x_scp[0]}
+        u_opt = {}
+        for t in range(1, j + 1):
+            x_opt[t] = M.addVars(n_x, lb=-GRB.INFINITY, name=f"xopt_{t}")
+        for k in range(j):
+            u_opt[k] = M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"uopt_{k}")
+            M.addConstr(
+                x_opt[k+1][0] == 0.9*x_opt[k][0] + u_opt[k][0]
+                + 0.2*u_opt[k][0]*x_opt[k][0],
+                name=f"opt_dyn0_{k}")
+            M.addConstr(
+                x_opt[k+1][1] == 0.7*x_opt[k][1] + 0.5*x_opt[k][0],
+                name=f"opt_dyn1_{k}")
+
+        # --- Objective: J_scp - J_opt ---
+        # J = sum_{t=0}^{j} ||x_t||^2 + r_cost * sum_{t=0}^{j-1} u_t^2
+        obj = gp.QuadExpr()
+        for t in range(j + 1):
+            for i in range(n_x):
+                obj += x_scp[t][i] * x_scp[t][i] - x_opt[t][i] * x_opt[t][i]
+        for k in range(j):
+            obj += r_cost * (u_scp[k] * u_scp[k] - u_opt[k][0] * u_opt[k][0])
+
+        M.setObjective(obj, GRB.MAXIMIZE)
+        self.x_scp = x_scp
+        self.x_opt = x_opt
+
+    def solve(self):
+        self.model.optimize()
+        return self.model.Status, self.model.Runtime
+
+    def solution_dict(self):
+        if self.model.SolCount == 0:
+            return {'subopt': None}
+        return {'subopt': self.model.ObjVal}
