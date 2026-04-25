@@ -79,25 +79,6 @@ def run(cfg):
 
     j_axis = list(j_vals)
 
-    # Plot 1: Farkas objective vs j
-    # fig1, ax1 = plt.subplots(figsize=(8, 5))
-    # for ti, T in enumerate(T_vals):
-    #     obj_vals = [
-    #         farkas_results[(T, j)]['farkas_obj']
-    #         if farkas_results[(T, j)]['farkas_obj'] is not None else float('nan')
-    #         for j in j_vals
-    #     ]
-    #     ax1.plot(j_axis, obj_vals,
-    #              marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
-    #              label=f'T={T}')
-    # ax1.axhline(0, color='k', linestyle='--', linewidth=1)
-    # ax1.set_xlabel('step $j$')
-    # ax1.set_ylabel('Farkas objective')
-    # ax1.legend()
-    # ax1.grid(True)
-    # fig1.tight_layout()
-    # fig1.savefig('bilinear_scp_farkas.pdf', bbox_inches='tight')
-    # plt.close(fig1)
 
     # Plot 2: max ||x_j||_inf vs j
     fig2, ax2 = plt.subplots(figsize=(8, 5))
@@ -120,20 +101,6 @@ def run(cfg):
     fig2.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
     plt.close(fig2)
 
-
-# ---------------------------------------------------------------------------
-# Bilinear system constants
-#   x+[0] = 0.9*x[0] + u + 0.2*u*x[0]
-#   x+[1] = 0.7*x[1] + 0.5*x[0]
-# SCP linearizes at (x_k, u=0):
-#   A = [[0.9, 0], [0.5, 0.7]]   (constant)
-#   B(x_k) = [[1 + 0.2*x_k[0]], [0]]   (depends on x_k[0])
-#
-# Steady-state gain x[1]/x[0] = 0.5/(1-0.7) = 1.67, within x_feas=2.
-# ---------------------------------------------------------------------------
-
-A_LIN = np.array([[0.9, 0.0], [0.5, 0.7]])   # constant A
-# A^T = [[0.9, 0.5], [0.0, 0.7]]
 
 
 def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound):
@@ -247,155 +214,6 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
     return x_chain
 
 
-# ---------------------------------------------------------------------------
-# Farkas lemma recursive feasibility check for SCP MPC
-# ---------------------------------------------------------------------------
-
-class BilinearSCPFarkas:
-    """
-    Checks recursive feasibility of the SCP-linearized MPC at step j.
-
-    At step j, the SCP QP is linearized at x_chain[j].  We search over
-    x_0 in X_0 for a Farkas certificate certifying infeasibility of that QP.
-
-    Farkas dual problem:
-      max   b(x_k)^T y_0 + d^T s
-      s.t.  A_eq(x_k)^T y + A_ineq^T s = 0
-            s >= 0
-            sum(s) = 1    (normalization)
-
-    where x_k = x_chain[j], y_t are equality duals (free), s are inequality duals.
-
-    If optimal > 0: exists x_0 in X_0 such that SCP QP at x_chain[j] is infeasible.
-    If <= 0: SCP QP is feasible for all x_0 in X_0.
-    """
-
-    def __init__(self, j=0, T=5, r_cost=0.0,
-                 x0_lo=-1.0, x0_hi=1.0, x_feas_lo=-2.0, x_feas_hi=2.0,
-                 u_bound=1.0, verbose=True, time_limit=None):
-        self.j = j
-        self.T = T
-        n_x = 2
-
-        M = gp.Model("bilinear_scp_farkas")
-        M.Params.OutputFlag = 1 if verbose else 0
-        M.Params.FeasibilityTol = 1e-9
-        M.Params.NonConvex = 2
-        M.Params.MIPGap = 0.01
-        if time_limit is not None:
-            M.Params.TimeLimit = time_limit
-        self.model = M
-
-        # Build SCP chain to step j; x_chain[j] is the state we check Farkas at
-        x_chain = _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
-        self.x_chain = x_chain
-        x_k = x_chain[j]   # linearization point for the Farkas QP
-
-        # ------------------------------------------------------------------
-        # Farkas dual variables for the SCP QP at x_k
-        #
-        # Equality constraints of the QP: T blocks (one per time step),
-        #   y_t in R^n_x is the dual for step t's dynamics constraint
-        # ------------------------------------------------------------------
-        y = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"y_{t}") for t in range(T)}
-
-        # Inequality duals  (all >= 0)
-        # s_up[t,i]: dual for x_m[t][i] <= x_feas_hi
-        # s_lo[t,i]: dual for x_m[t][i] >= x_feas_lo  (i.e. -x_m[t][i] <= -x_feas_lo)
-        s_up   = {(t, i): M.addVar(lb=0.0, name=f"s_up_{t}_{i}")
-                  for t in range(1, T + 1) for i in range(n_x)}
-        s_lo   = {(t, i): M.addVar(lb=0.0, name=f"s_lo_{t}_{i}")
-                  for t in range(1, T + 1) for i in range(n_x)}
-        s_u_up = {t: M.addVar(lb=0.0, name=f"su_up_{t}") for t in range(T)}
-        s_u_lo = {t: M.addVar(lb=0.0, name=f"su_lo_{t}") for t in range(T)}
-
-        self.y = y
-        self.s_up = s_up
-        self.s_lo = s_lo
-        self.s_u_up = s_u_up
-        self.s_u_lo = s_u_lo
-
-        # ------------------------------------------------------------------
-        # Dual feasibility: A_eq(x_k)^T y + A_ineq^T s = 0
-        #
-        # A = [[0.9, 0], [0.5, 0.7]],  A^T = [[0.9, 0.5], [0, 0.7]]
-        # B(x_k)^T = [[1+0.2*x_k[0], 0]]
-        #
-        # For x_m[s][0] (s=1..T-1):
-        #   y_{s-1}[0] - 0.9*y_s[0] - 0.5*y_s[1] + s_up[s,0] - s_lo[s,0] = 0
-        # For x_m[s][1] (s=1..T-1):
-        #   y_{s-1}[1] - 0.7*y_s[1] + s_up[s,1] - s_lo[s,1] = 0
-        # For x_m[T][0]:
-        #   y_{T-1}[0] + s_up[T,0] - s_lo[T,0] = 0
-        # For x_m[T][1]:
-        #   y_{T-1}[1] + s_up[T,1] - s_lo[T,1] = 0
-        # For u_m[t]:
-        #   -(1 + 0.2*x_k[0])*y_t[0] + s_u_up[t] - s_u_lo[t] = 0
-        # ------------------------------------------------------------------
-        for s in range(1, T):
-            M.addConstr(
-                y[s-1][0] - 0.9*y[s][0] - 0.5*y[s][1] + s_up[s, 0] - s_lo[s, 0] == 0,
-                name=f"df_x0_{s}")
-            M.addConstr(
-                y[s-1][1] - 0.7*y[s][1] + s_up[s, 1] - s_lo[s, 1] == 0,
-                name=f"df_x1_{s}")
-
-        M.addConstr(y[T-1][0] + s_up[T, 0] - s_lo[T, 0] == 0, name="df_xT0")
-        M.addConstr(y[T-1][1] + s_up[T, 1] - s_lo[T, 1] == 0, name="df_xT1")
-
-        for t in range(T):
-            # -(1 + 0.2*x_k[0])*y[t][0] + s_u_up[t] - s_u_lo[t] = 0
-            # Bilinear term: x_k[0]*y[t][0]
-            M.addConstr(
-                -y[t][0] - 0.2*x_k[0]*y[t][0] + s_u_up[t] - s_u_lo[t] == 0,
-                name=f"df_u_{t}")
-
-        # Normalization: sum of all inequality duals = 1
-        M.addConstr(
-            gp.quicksum(s_up[t, i] + s_lo[t, i]
-                        for t in range(1, T + 1) for i in range(n_x))
-            + gp.quicksum(s_u_up[t] + s_u_lo[t] for t in range(T))
-            == 1.0,
-            name="norm")
-
-        # ------------------------------------------------------------------
-        # Objective: b(x_k)^T y_0 + d^T s
-        #
-        # b(x_k) = A * x_k = [0.9*x_k[0],  0.5*x_k[0] + 0.7*x_k[1]]
-        # b(x_k)^T y_0 = 0.9*x_k[0]*y[0][0] + 0.5*x_k[0]*y[0][1] + 0.7*x_k[1]*y[0][1]
-        #   (bilinear in x_k and y[0])
-        #
-        # d^T s = x_feas_hi  * sum(s_up)
-        #       + (-x_feas_lo)* sum(s_lo)   [d = -x_feas_lo for -x_m[t][i] <= -x_feas_lo]
-        #       + u_bound     * sum(s_u_up + s_u_lo)
-        # ------------------------------------------------------------------
-        d_s = (
-            x_feas_hi * gp.quicksum(s_up[t, i] for t in range(1, T+1) for i in range(n_x))
-            + (-x_feas_lo) * gp.quicksum(s_lo[t, i] for t in range(1, T+1) for i in range(n_x))
-            + u_bound * gp.quicksum(s_u_up[t] + s_u_lo[t] for t in range(T))
-        )
-
-        # Bilinear objective terms
-        obj = (
-            0.9*x_k[0]*y[0][0]
-            + 0.5*x_k[0]*y[0][1]
-            + 0.7*x_k[1]*y[0][1]
-            + d_s
-        )
-        M.setObjective(obj, GRB.MAXIMIZE)
-
-    def solve(self):
-        self.model.optimize()
-        return self.model.Status, self.model.Runtime
-
-    def solution_dict(self):
-        if self.model.SolCount == 0:
-            return {'farkas_obj': None}
-        return {
-            'farkas_obj': self.model.ObjVal,
-            'x_chain': {k: {i: self.x_chain[k][i].X for i in range(2)}
-                        for k in range(self.j + 1)},
-        }
 
 
 # ---------------------------------------------------------------------------
