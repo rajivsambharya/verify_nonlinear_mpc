@@ -125,13 +125,21 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
     """
     Build j steps of SCP MPC chain in model M.
 
-    At each step k=0..j-1:
-      - Linearize at x_chain[k]: B(x_chain[k]) = [[1+0.2*x_chain[k][0]], [0]]
-      - Add KKT of the linearized QP to obtain optimal control u_k
-      - Propagate true nonlinear dynamics: x_chain[k+1] = f_true(x_chain[k], u_k)
+    At each step k=0..j-1, linearize at (x_chain[k], u_prev):
+      u_prev = 0          for k=0 (no prior control)
+      u_prev = u_chain[k-1]  for k>0
 
-    x_chain[0] in [x0_lo, x0_hi]^2.
-    x_chain[1..j] bounded in [x_feas_lo, x_feas_hi]^2.
+    Linearized dynamics:
+      A_k = [[0.9 + 0.2*u_prev, 0], [0.5, 0.7]]
+      B_k = [[1 + 0.2*x_k[0]], [0]]
+      affine offset c_k = 0  (cancels exactly for this system)
+
+      x_m[t+1][0] = (0.9 + 0.2*u_prev)*x_m[t][0] + (1 + 0.2*x_k[0])*u_m[t][0]
+      x_m[t+1][1] = 0.5*x_m[t][0] + 0.7*x_m[t][1]
+
+    KKT uses A_k^T = [[0.9 + 0.2*u_prev, 0.5], [0, 0.7]].
+
+    Chain propagates true nonlinear dynamics.
 
     Returns (x_chain, u_chain) where u_chain[k] is the applied control at step k.
     """
@@ -144,6 +152,8 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
 
     for k in range(j):
         x_k = x_chain[k]
+        # u_prev: 0 at first step, previous applied control thereafter
+        u_prev = 0.0 if k == 0 else u_chain[k - 1]
 
         # Inner QP variables
         x_m = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xm_{k}_{t}")
@@ -167,12 +177,14 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
                 M.addConstr(x_m[t][i] >= x_feas_lo, name=f"mc_flo_{k}_{t}_{i}")
                 M.addConstr(x_m[t][i] <= x_feas_hi, name=f"mc_fhi_{k}_{t}_{i}")
 
-        # Linearized dynamics: x_{t+1} = A*x_m[t] + B(x_k)*u_m[t]
-        # x_m[t+1][0] = 0.9*x_m[t][0] + (1 + 0.2*x_k[0])*u_m[t][0]
-        # x_m[t+1][1] = 0.5*x_m[t][0] + 0.7*x_m[t][1]
+        # Linearized dynamics:
+        #   x_m[t+1][0] = (0.9 + 0.2*u_prev)*x_m[t][0] + (1 + 0.2*x_k[0])*u_m[t][0]
+        #   x_m[t+1][1] = 0.5*x_m[t][0] + 0.7*x_m[t][1]
+        # When k>0, u_prev is a Gurobi var -> bilinear term u_prev*x_m[t][0]
         for t in range(T):
             M.addConstr(
-                x_m[t+1][0] == 0.9*x_m[t][0] + u_m[t][0] + 0.2*x_k[0]*u_m[t][0],
+                x_m[t+1][0] == 0.9*x_m[t][0] + 0.2*u_prev*x_m[t][0]
+                + u_m[t][0] + 0.2*x_k[0]*u_m[t][0],
                 name=f"mc_dyn0_{k}_{t}")
             M.addConstr(
                 x_m[t+1][1] == 0.5*x_m[t][0] + 0.7*x_m[t][1],
@@ -184,11 +196,13 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
                         name=f"mc_term_{k}_{i}")
 
         # KKT backward costate (t=T-1..1)
-        # A^T = [[0.9, 0.5], [0, 0.7]]
+        # A_k^T = [[0.9 + 0.2*u_prev, 0.5], [0, 0.7]]
+        # When k>0, u_prev is a Gurobi var -> bilinear term u_prev*lam[t+1][0]
         for t in range(T - 1, 0, -1):
             M.addConstr(
                 lam[t][0] == Q[0, 0]*x_m[t][0]
-                + 0.9*lam[t+1][0] + 0.5*lam[t+1][1]
+                + 0.9*lam[t+1][0] + 0.2*u_prev*lam[t+1][0]
+                + 0.5*lam[t+1][1]
                 - xi_up[t][0] + xi_lo[t][0],
                 name=f"mc_back0_{k}_{t}")
             M.addConstr(
@@ -198,7 +212,7 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
                 name=f"mc_back1_{k}_{t}")
 
         # KKT stationarity w.r.t. u_m[t]:
-        # R*u_m[t][0] + (1 + 0.2*x_k[0])*lam[t+1][0] + mu_up[t] - mu_lo[t] = 0
+        # r_cost*u_m[t][0] + (1 + 0.2*x_k[0])*lam[t+1][0] + mu_up[t] - mu_lo[t] = 0
         for t in range(T):
             M.addConstr(
                 r_cost*u_m[t][0]
@@ -220,7 +234,6 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound)
                             name=f"mc_clo_x_{k}_{t}_{i}")
 
         # True nonlinear chain dynamics: x_chain[k+1] = f_true(x_chain[k], u_k)
-        # u_k = u_m[0][0]
         u_k = u_m[0][0]
         u_chain[k] = u_k
         x_chain[k+1] = M.addVars(n_x, lb=x_feas_lo, ub=x_feas_hi, name=f"xc_{k+1}")
