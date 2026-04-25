@@ -9,6 +9,7 @@ import benchmarks.cartpole_ilqr_cycle as cartpole_ilqr_cycle
 import benchmarks.cartpole_recursive_feas as cartpole_recursive_feas
 import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
 import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
+import benchmarks.bilinear_closed_loop as bilinear_closed_loop
 import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.spring_masses as spring_masses
 import benchmarks.cartpole_constrained_stability_scp as cartpole_constrained_stability_scp
@@ -51,6 +52,11 @@ def main_run_nonlinear_double_integrator(cfg):
 @hydra.main(config_path='configs', config_name='bilinear_recursive_feas.yaml')
 def main_run_bilinear_recursive_feas(cfg):
     bilinear_recursive_feas.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='bilinear_closed_loop.yaml')
+def main_run_bilinear_closed_loop(cfg):
+    bilinear_closed_loop.run(cfg)
 
 
 @hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
@@ -146,6 +152,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'bilinear_recursive_feas/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_bilinear_recursive_feas()
+    elif sys.argv[1] == 'bilinear_closed_loop':
+        sys.argv[1] = base + 'bilinear_closed_loop/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_bilinear_closed_loop()
     elif sys.argv[1] == 'stir_tank_subopt':
         sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]

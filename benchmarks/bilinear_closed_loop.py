@@ -51,22 +51,8 @@ def run(cfg):
                 time_limit=cfg.time_limit,
             )
 
-            # Farkas feasibility check
-            # print(f"=== Farkas: j={j}, T={T} ===")
-            # farkas = BilinearSCPFarkas(**common_kwargs)
-            # status_f, t_f = farkas.solve()
-            # sol_f = farkas.solution_dict()
-            # obj_f = sol_f['farkas_obj']
-            # certified = obj_f is not None and obj_f <= feas_tol
-            # farkas_results[(T, j)] = {
-            #     'certified': certified, 'farkas_obj': obj_f,
-            #     'status': status_f, 'time': t_f,
-            # }
-            # status_str = 'CERTIFIED FEASIBLE' if certified else f'INFEASIBLE EXISTS (obj={obj_f})'
-            # print(f"  farkas_obj={obj_f}  {status_str}")
-
-            # Max ||x_j||_inf
-            print(f"=== Norm: j={j}, T={T} ===")
+            # Max closed-loop suboptimality
+            print(f"=== closed-loop suboptimality: j={j}, T={T} ===")
             norm_prob = BilinearMaxStateNorm(**common_kwargs)
             status_n, t_n = norm_prob.solve()
             sol_n = norm_prob.solution_dict()
@@ -80,38 +66,38 @@ def run(cfg):
     print("\n=== Summary ===")
     for T in T_vals:
         for j in j_vals:
-            rf = farkas_results[(T, j)]
+            # rf = farkas_results[(T, j)]
             rn = norm_results[(T, j)]
-            if rf['certified']:
-                tag = "OK"
-            elif rf['farkas_obj'] is not None:
-                tag = f"FAIL(obj={rf['farkas_obj']:.2e})"
-            else:
-                tag = "FAIL(N/A)"
+            # if rf['certified']:
+            #     tag = "OK"
+            # elif rf['farkas_obj'] is not None:
+            #     tag = f"FAIL(obj={rf['farkas_obj']:.2e})"
+            # else:
+            #     tag = "FAIL(N/A)"
             norm_str = f"{rn['inf_norm']:.4f}" if rn['inf_norm'] is not None else "N/A"
-            print(f"  T={T}, j={j}: {tag}  ||x_j||_inf={norm_str}")
+            # print(f"  T={T}, j={j}: {tag}  ||x_j||_inf={norm_str}")
 
     j_axis = list(j_vals)
 
     # Plot 1: Farkas objective vs j
-    fig1, ax1 = plt.subplots(figsize=(8, 5))
-    for ti, T in enumerate(T_vals):
-        obj_vals = [
-            farkas_results[(T, j)]['farkas_obj']
-            if farkas_results[(T, j)]['farkas_obj'] is not None else float('nan')
-            for j in j_vals
-        ]
-        ax1.plot(j_axis, obj_vals,
-                 marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
-                 label=f'T={T}')
-    ax1.axhline(0, color='k', linestyle='--', linewidth=1)
-    ax1.set_xlabel('step $j$')
-    ax1.set_ylabel('Farkas objective')
-    ax1.legend()
-    ax1.grid(True)
-    fig1.tight_layout()
-    fig1.savefig('bilinear_scp_farkas.pdf', bbox_inches='tight')
-    plt.close(fig1)
+    # fig1, ax1 = plt.subplots(figsize=(8, 5))
+    # for ti, T in enumerate(T_vals):
+    #     obj_vals = [
+    #         farkas_results[(T, j)]['farkas_obj']
+    #         if farkas_results[(T, j)]['farkas_obj'] is not None else float('nan')
+    #         for j in j_vals
+    #     ]
+    #     ax1.plot(j_axis, obj_vals,
+    #              marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
+    #              label=f'T={T}')
+    # ax1.axhline(0, color='k', linestyle='--', linewidth=1)
+    # ax1.set_xlabel('step $j$')
+    # ax1.set_ylabel('Farkas objective')
+    # ax1.legend()
+    # ax1.grid(True)
+    # fig1.tight_layout()
+    # fig1.savefig('bilinear_scp_farkas.pdf', bbox_inches='tight')
+    # plt.close(fig1)
 
     # Plot 2: max ||x_j||_inf vs j
     fig2, ax2 = plt.subplots(figsize=(8, 5))
@@ -121,15 +107,17 @@ def run(cfg):
             if norm_results[(T, j)]['inf_norm'] is not None else float('nan')
             for j in j_vals
         ]
-        ax2.plot(j_axis, norm_vals,
+        ax2.plot(j_axis[1:], norm_vals[1:],
                  marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
                  label=f'T={T}')
+    # import pdb; pdb.set_trace()
     ax2.set_xlabel('step $j$')
-    ax2.set_ylabel(r'$\max \|x_j\|_\infty$')
+    ax2.set_yscale('log')
+    ax2.set_ylabel('closed-loop suboptimality')
     ax2.legend()
     ax2.grid(True)
     fig2.tight_layout()
-    fig2.savefig('bilinear_scp_max_norm.pdf', bbox_inches='tight')
+    fig2.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
     plt.close(fig2)
 
 
