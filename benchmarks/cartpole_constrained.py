@@ -39,7 +39,7 @@ def run(cfg):
         # --- Phase 1: upper bound on V_0 = J*(x_0) for this horizon T ---
         phase1 = CartpoleConstrainedPhase1(
             T=T, r=r, dt=dt, mass=1, length=1, g=9.8,
-            x_lo=x_min, x_hi=x_max, u_bound=u_bound, verbose=True,
+            x_lo=x_min, x_hi=x_max, u_bound=u_bound, verbose=False,
             time_limit=cfg.time_limit
         )
         phase1.solve()
@@ -61,7 +61,7 @@ def run(cfg):
                     n=cfg.n, K=k+1, T=T, r=r, dt=dt,
                     mass=1, length=1, g=9.8, rho=rho_mid,
                     x_lo=x_min, x_hi=x_max, u_bound=u_bound,
-                    seed=42, verbose=True,
+                    seed=42, verbose=False,
                     time_limit=cfg.time_limit, V_0_max=V_0_max
                 )
 

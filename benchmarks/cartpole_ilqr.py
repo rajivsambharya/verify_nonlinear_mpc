@@ -59,7 +59,7 @@ def run(cfg):
                 ver = CartpoleILQRVerify(
                     n=cfg.n, K=k+1, T=T, r=r, dt=dt,
                     mass=1, length=1, g=9.8, rho=rho_mid,
-                    x_lo=x_min, x_hi=x_max, seed=42, verbose=True,
+                    x_lo=x_min, x_hi=x_max, seed=42, verbose=False,
                     time_limit=cfg.time_limit, V_0_max=V_0_max
                 )
 
@@ -477,23 +477,26 @@ class CartpoleILQRVerify:
         #     V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
         # else:
         # Phase 2: Lyapunov candidate V(x) = J*(x) = MPC value function
-        # V_curr = (
-        #     gp.quicksum(Q[i, i] * self.x_mpc[0][t][i] * self.x_mpc[0][t][i]
-        #                 for t in range(T + 1) for i in range(n_x))
-        #     + gp.quicksum(R[j, j] * self.u_mpc_var[0][t][j] * self.u_mpc_var[0][t][j]
-        #                     for t in range(T) for j in range(n_u))
-        # )
-        # V_next = (
-        #     gp.quicksum(Q[i, i] * self.x_mpc[K][t][i] * self.x_mpc[K][t][i]
-        #                 for t in range(T + 1) for i in range(n_x))
-        #     + gp.quicksum(R[j, j] * self.u_mpc_var[K][t][j] * self.u_mpc_var[K][t][j]
-        #                     for t in range(T) for j in range(n_u))
-        # )
+        V_curr = (
+            gp.quicksum(Q[i, i] * self.x_mpc[0][t][i] * self.x_mpc[0][t][i]
+                        for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(R[j, j] * self.u_mpc_var[0][t][j] * self.u_mpc_var[0][t][j]
+                            for t in range(T) for j in range(n_u))
+        )
+        V_next = (
+            gp.quicksum(Q[i, i] * self.x_mpc[K][t][i] * self.x_mpc[K][t][i]
+                        for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(R[j, j] * self.u_mpc_var[K][t][j] * self.u_mpc_var[K][t][j]
+                            for t in range(T) for j in range(n_u))
+        )
         # # Restrict to initial conditions reachable under the MPC policy
         # M.addConstr(V_curr <= V_0_max, name="V0_bound")
 
-        V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
-        V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
+        # V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
+        # V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
+
+        # import pdb
+        # pdb.set_trace()
 
         self.V_curr = V_curr
         self.V_next = V_next

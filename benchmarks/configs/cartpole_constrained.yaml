@@ -1,6 +1,6 @@
 K: 1
-T_vals: [2, 10]
-dt: .1
+T_vals: [2, 5, 10]
+dt: .001
 r: 0.0
 tol: 0.0001
 time_limit: 1000

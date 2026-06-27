@@ -52,8 +52,6 @@ def run(cfg):
     r_cost = cfg.r_cost
     x0_lo = cfg.x0_mins[0]
     x0_hi = cfg.x0_maxes[0]
-    x_feas_lo = cfg.x_feas_mins[0]
-    x_feas_hi = cfg.x_feas_maxes[0]
     u_bound = cfg.u_bound
     sys = BilinearSystem(a00=cfg.a00, a10=cfg.a10, a11=cfg.a11, b=cfg.b)
 
@@ -65,7 +63,6 @@ def run(cfg):
             common_kwargs = dict(
                 j=j, T=T, r_cost=r_cost,
                 x0_lo=x0_lo, x0_hi=x0_hi,
-                x_feas_lo=x_feas_lo, x_feas_hi=x_feas_hi,
                 u_bound=u_bound, sys=sys, verbose=False,
                 time_limit=cfg.time_limit,
             )
@@ -119,7 +116,7 @@ def run(cfg):
     ax.set_xlabel('step $j$')
     ax.set_yscale('log')
     ax.set_ylabel('closed-loop suboptimality')
-    ax.legend()
+    # ax.legend()
     ax.grid(True)
     fig.tight_layout()
     fig.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
@@ -141,8 +138,7 @@ def run(cfg):
 # A^T = [[0.9, 0.5], [0.0, 0.7]]
 
 
-def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, x_feas_lo, x_feas_hi,
-                      u_bound, sys):
+def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys):
     """
     Add one SCP iteration KKT block to model M.
 
@@ -166,16 +162,9 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, x_feas_lo, x_feas_hi
            for t in range(T + 1)}
     mu_up = {t: M.addVar(lb=0.0, name=f"mu_up_{tag}_{t}") for t in range(T)}
     mu_lo = {t: M.addVar(lb=0.0, name=f"mu_lo_{tag}_{t}") for t in range(T)}
-    xi_up = {t: M.addVars(n_x, lb=0.0, name=f"xi_up_{tag}_{t}") for t in range(1, T + 1)}
-    xi_lo = {t: M.addVars(n_x, lb=0.0, name=f"xi_lo_{tag}_{t}") for t in range(1, T + 1)}
 
     for i in range(n_x):
         M.addConstr(x_m[0][i] == x_k[i], name=f"init_{tag}_{i}")
-
-    for t in range(1, T + 1):
-        for i in range(n_x):
-            M.addConstr(x_m[t][i] >= x_feas_lo, name=f"flo_{tag}_{t}_{i}")
-            M.addConstr(x_m[t][i] <= x_feas_hi, name=f"fhi_{tag}_{t}_{i}")
 
     # Linearized dynamics:
     #   x_m[t+1][0] = (a00 + b*ub)*x_m[t][0] + (1 + b*xb0)*u_m[t][0] - b*ub*xb0
@@ -192,9 +181,9 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, x_feas_lo, x_feas_hi
             x_m[t+1][1] == a10*x_m[t][0] + a11*x_m[t][1],
             name=f"dyn1_{tag}_{t}")
 
-    # KKT terminal costate
+    # KKT terminal costate (no state constraints)
     for i in range(n_x):
-        M.addConstr(lam[T][i] == Q[i, i]*x_m[T][i] - xi_up[T][i] + xi_lo[T][i],
+        M.addConstr(lam[T][i] == Q[i, i]*x_m[T][i],
                     name=f"term_{tag}_{i}")
 
     # KKT backward costate: A[t]^T = [[a00 + b*ub, a10], [0, a11]]
@@ -203,13 +192,11 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, x_feas_lo, x_feas_hi
         M.addConstr(
             lam[t][0] == Q[0, 0]*x_m[t][0]
             + a00*lam[t+1][0] + b*ub*lam[t+1][0]
-            + a10*lam[t+1][1]
-            - xi_up[t][0] + xi_lo[t][0],
+            + a10*lam[t+1][1],
             name=f"back0_{tag}_{t}")
         M.addConstr(
             lam[t][1] == Q[1, 1]*x_m[t][1]
-            + a11*lam[t+1][1]
-            - xi_up[t][1] + xi_lo[t][1],
+            + a11*lam[t+1][1],
             name=f"back1_{tag}_{t}")
 
     # KKT stationarity: r_cost*u + (1 + b*xb0)*lam[t+1][0] + mu_up - mu_lo = 0
@@ -225,18 +212,10 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, x_feas_lo, x_feas_hi
         M.addConstr(mu_up[t]*(u_m[t][0] - u_bound) == 0, name=f"cup_{tag}_{t}")
         M.addConstr(mu_lo[t]*(-u_bound - u_m[t][0]) == 0, name=f"clo_{tag}_{t}")
 
-    for t in range(1, T + 1):
-        for i in range(n_x):
-            M.addConstr(xi_up[t][i]*(x_feas_hi - x_m[t][i]) == 0,
-                        name=f"cup_x_{tag}_{t}_{i}")
-            M.addConstr(xi_lo[t][i]*(x_m[t][i] - x_feas_lo) == 0,
-                        name=f"clo_x_{tag}_{t}_{i}")
-
     return x_m, u_m
 
 
-def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound, sys,
-                   n_iters=2):
+def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys, n_iters=2):
     """
     Build j steps of SCP MPC chain using n_iters SCP iterations per step.
 
@@ -263,14 +242,13 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound,
             x_sol, u_sol = _add_one_scp_iter(
                 M, tag=f"{k}_{it}", x_k=x_k,
                 x_bar=x_bar, u_bar=u_bar,
-                T=T, r_cost=r_cost,
-                x_feas_lo=x_feas_lo, x_feas_hi=x_feas_hi, u_bound=u_bound, sys=sys)
+                T=T, r_cost=r_cost, u_bound=u_bound, sys=sys)
             x_bar = {t: x_sol[t] for t in range(T)}
             u_bar = {t: u_sol[t][0] for t in range(T)}
 
         u_k = u_sol[0][0]
         u_chain[k] = u_k
-        x_chain[k+1] = M.addVars(n_x, lb=x_feas_lo, ub=x_feas_hi, name=f"xc_{k+1}")
+        x_chain[k+1] = M.addVars(n_x, lb=-GRB.INFINITY, name=f"xc_{k+1}")
         M.addConstr(
             x_chain[k+1][0] == a00*x_k[0] + u_k + b*u_k*x_k[0],
             name=f"chain_dyn0_{k}")
@@ -287,7 +265,7 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound,
 # Helper: true (nonlinear) MPC chain for BilinearMaxStateNorm
 # ---------------------------------------------------------------------------
 
-def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound, sys):
+def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
     """
     Add j steps of true (nonlinear) MPC chain to model M.
     Uses exact bilinear dynamics and nonlinear KKT conditions.
@@ -303,7 +281,7 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_b
     x_chain[0] = M.addVars(n_x, lb=x0_lo, ub=x0_hi, name="xc_0")
 
     for t in range(1, j + 1):
-        x_chain[t] = M.addVars(n_x, lb=x_feas_lo, ub=x_feas_hi, name=f"xc_{t}")
+        x_chain[t] = M.addVars(n_x, lb=-GRB.INFINITY, name=f"xc_{t}")
 
     for k in range(j):
         u_k = M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"uc_{k}")
@@ -315,18 +293,11 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_b
                  for t in range(T)}
         mu_up = {t: M.addVars(n_u, lb=0.0, name=f"muc_up_{k}_{t}") for t in range(T)}
         mu_lo = {t: M.addVars(n_u, lb=0.0, name=f"muc_lo_{k}_{t}") for t in range(T)}
-        xi_up = {t: M.addVars(n_x, lb=0.0, name=f"xic_up_{k}_{t}") for t in range(1, T + 1)}
-        xi_lo = {t: M.addVars(n_x, lb=0.0, name=f"xic_lo_{k}_{t}") for t in range(1, T + 1)}
         lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lamc_{k}_{t}")
                for t in range(T + 1)}
 
         for i in range(n_x):
             M.addConstr(x_mpc[0][i] == x_chain[k][i], name=f"mc_init_{k}_{i}")
-
-        for t in range(1, T + 1):
-            for i in range(n_x):
-                M.addConstr(x_mpc[t][i] >= x_feas_lo, name=f"mflo_{k}_{t}_{i}")
-                M.addConstr(x_mpc[t][i] <= x_feas_hi, name=f"mfhi_{k}_{t}_{i}")
 
         # True nonlinear dynamics
         for t in range(T):
@@ -337,21 +308,19 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_b
                 x_mpc[t+1][1] == a11*x_mpc[t][1] + a10*x_mpc[t][0],
                 name=f"cdyn1_{k}_{t}")
 
+        # KKT terminal costate (no state constraints)
         for i in range(n_x):
-            M.addConstr(lam[T][i] == Q[i, i] * x_mpc[T][i]
-                        - xi_up[T][i] + xi_lo[T][i], name=f"tc_{k}_{i}")
+            M.addConstr(lam[T][i] == Q[i, i] * x_mpc[T][i], name=f"tc_{k}_{i}")
 
         # Backward costate: df/dx^T * lam, df/du = (1 + b*x[0])
         for t in range(T - 1, 0, -1):
             M.addConstr(
                 lam[t][0] == Q[0, 0] * x_mpc[t][0]
                 + a00*lam[t+1][0] + b*u_mpc[t][0]*lam[t+1][0]
-                + a10*lam[t+1][1]
-                - xi_up[t][0] + xi_lo[t][0],
+                + a10*lam[t+1][1],
                 name=f"cs0c_{k}_{t}")
             M.addConstr(
-                lam[t][1] == Q[1, 1] * x_mpc[t][1] + a11*lam[t+1][1]
-                - xi_up[t][1] + xi_lo[t][1],
+                lam[t][1] == Q[1, 1] * x_mpc[t][1] + a11*lam[t+1][1],
                 name=f"cs1c_{k}_{t}")
 
         for t in range(T):
@@ -362,13 +331,6 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_b
                 name=f"statc_{k}_{t}")
             M.addConstr(mu_up[t][0] * (u_mpc[t][0] - u_bound) == 0, name=f"cup_c_{k}_{t}")
             M.addConstr(mu_lo[t][0] * (-u_bound - u_mpc[t][0]) == 0, name=f"clo_c_{k}_{t}")
-
-        for t in range(1, T + 1):
-            for i in range(n_x):
-                M.addConstr(xi_up[t][i] * (x_feas_hi - x_mpc[t][i]) == 0,
-                            name=f"cup_xc_{k}_{t}_{i}")
-                M.addConstr(xi_lo[t][i] * (x_mpc[t][i] - x_feas_lo) == 0,
-                            name=f"clo_xc_{k}_{t}_{i}")
 
         M.addConstr(u_k[0] == u_mpc[0][0], name=f"link_{k}")
 
@@ -397,7 +359,7 @@ class BilinearMaxStateNorm:
     """
 
     def __init__(self, j=0, T=5, r_cost=0.1,
-                 x0_lo=0.0, x0_hi=1.0, x_feas_lo=-2.0, x_feas_hi=2.0,
+                 x0_lo=0.0, x0_hi=1.0,
                  u_bound=1.0, sys=None, verbose=True, time_limit=None):
         self.j = j
         n_x, n_u = 2, 1
@@ -411,8 +373,7 @@ class BilinearMaxStateNorm:
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
 
-        xc, uc = _add_true_mpc_chain(
-            M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi, u_bound, sys)
+        xc, uc = _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys)
 
         # Unconstrained optimal chain (same x_0, free dynamics)
         x_opt = {0: xc[0]}
@@ -434,7 +395,7 @@ class BilinearMaxStateNorm:
                 obj += xc[jj][ii] * xc[jj][ii] - x_opt[jj][ii] * x_opt[jj][ii]
         for jj in range(j):
             obj += r_cost * (uc[jj][0] * uc[jj][0] - u_opt[jj][0] * u_opt[jj][0])
-        M.setParam('BestBdStop', 1e-5)
+        M.Params.MIPGapAbs = 0.0001
         M.setObjective(obj, GRB.MAXIMIZE)
         self._subs.append((M, xc, uc, x_opt, u_opt, 0, 1))
 
@@ -477,7 +438,7 @@ class BilinearSCPSubopt:
     """
 
     def __init__(self, j=0, T=5, r_cost=0.1,
-                 x0_lo=-1.0, x0_hi=1.0, x_feas_lo=-2.0, x_feas_hi=2.0,
+                 x0_lo=-1.0, x0_hi=1.0,
                  u_bound=1.0, sys=None, verbose=True, time_limit=None, n_iters=2):
         self.j = j
         n_x, n_u = 2, 1
@@ -487,13 +448,12 @@ class BilinearSCPSubopt:
         M.Params.OutputFlag = 1 if verbose else 0
         M.Params.FeasibilityTol = 1e-9
         M.Params.NonConvex = 2
-        M.Params.MIPGap = 0.01
+        M.Params.MIPGapAbs = 0.0001
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
-        M.setParam('BestBdStop', 1e-5)
         self.model = M
 
-        x_scp, u_scp = _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, x_feas_lo, x_feas_hi,
+        x_scp, u_scp = _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi,
                                        u_bound, sys, n_iters=n_iters)
 
         # Unconstrained optimal chain (same x_0, free dynamics)
