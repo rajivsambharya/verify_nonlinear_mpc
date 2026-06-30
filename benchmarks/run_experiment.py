@@ -11,6 +11,7 @@ import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
 import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
 import benchmarks.bilinear_closed_loop as bilinear_closed_loop
 import benchmarks.bilinear_closed_loop2 as bilinear_closed_loop2
+import benchmarks.bilinear_closed_loop_ilqr as bilinear_closed_loop_ilqr
 import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.spring_masses as spring_masses
 import benchmarks.cartpole_constrained_stability_scp as cartpole_constrained_stability_scp
@@ -63,6 +64,11 @@ def main_run_bilinear_closed_loop(cfg):
 @hydra.main(config_path='configs', config_name='bilinear_closed_loop2.yaml')
 def main_run_bilinear_closed_loop2(cfg):
     bilinear_closed_loop2.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='bilinear_closed_loop_ilqr.yaml')
+def main_run_bilinear_closed_loop_ilqr(cfg):
+    bilinear_closed_loop_ilqr.run(cfg)
 
 
 @hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
@@ -166,6 +172,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'bilinear_closed_loop2/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_bilinear_closed_loop2()
+    elif sys.argv[1] == 'bilinear_closed_loop_ilqr':
+        sys.argv[1] = base + 'bilinear_closed_loop_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_bilinear_closed_loop_ilqr()
     elif sys.argv[1] == 'stir_tank_subopt':
         sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
