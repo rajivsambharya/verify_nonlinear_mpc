@@ -1,11 +1,19 @@
-K: 1 #6 #15
-T_vals: [2, 5, 10, 20] #, 10]
-dt: .05
-r: 0.001 #0.0
+# T_vals: [2, 5, 10, 20]
+# n_ilqr_iters: [1, 2, 3, 5]
+# dt: .05
+# r: 0.001
+# time_limit: 1000
+# rho_max: 5
+# x_mins: [-2]
+# x_maxes: [2]
+# tol: 1e-4
+
+T_vals: [2, 5, 10, 20]
+n_ilqr_iters: [1, 2] #, 3, 5]
+dt: .01
+r: 0 #0.00 #0.0001
 time_limit: 1000
-n: 10
 rho_max: 5
-x_mins: [-2] #[-1.0]
-x_maxes: [2] #[1.0]
-num_samples: 10
+x_mins: [-3]
+x_maxes: [3]
 tol: 1e-4

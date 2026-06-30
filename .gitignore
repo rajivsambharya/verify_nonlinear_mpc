@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 outputs/
 .DS_Store
+
+ilqr_closed_loop.pdf
+ilqr_sim2_stage.pdf
+ilqr_sim2_total.pdf
+ilqr_sim_bilinear_stage.pdf
+ilqr_sim_bilinear_total.pdf

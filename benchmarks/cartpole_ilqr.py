@@ -18,11 +18,11 @@ plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
 
 
 def run(cfg):
-    K = cfg.K
     x_mins = cfg.x_mins
     x_maxes = cfg.x_maxes
 
     T_vals_list = list(cfg.T_vals)
+    n_ilqr_iters_list = list(cfg.n_ilqr_iters)
     r = cfg.r
     dt = cfg.dt
 
@@ -31,22 +31,13 @@ def run(cfg):
     rho_max = cfg.rho_max
 
     n_T = len(T_vals_list)
-    times    = np.zeros((n_T, K))
-    opt_vals = np.zeros((n_T, K))
+    n_iters_axis = len(n_ilqr_iters_list)
+    times    = np.zeros((n_T, n_iters_axis))
+    opt_vals = np.zeros((n_T, n_iters_axis))
 
     for ti, T in enumerate(T_vals_list):
-        # --- Phase 1: upper bound on V_0 = J*(x_0) for this horizon T ---
-        phase1 = CartpolePhase1(
-            T=T, r=r, dt=dt, mass=1, length=1, g=9.8,
-            x_lo=x_min, x_hi=x_max, verbose=True,
-            time_limit=cfg.time_limit
-        )
-        phase1.solve()
-        V_0_max = phase1.V0_max()
-        print(f"T={T}: Phase 1 V_0_max = {V_0_max}")
-
-        # --- Phase 2: bisection over rho using V_0_max from Phase 1 ---
-        for k in range(K):
+        # --- Bisection over rho for each number of iLQR iterations ---
+        for ii, n_iters in enumerate(n_ilqr_iters_list):
             rho_lo = 0.0
             rho_hi = rho_max
             best_rho = None
@@ -56,46 +47,48 @@ def run(cfg):
             while rho_hi - rho_lo > cfg.tol:
                 rho_mid = (rho_lo + rho_hi) / 2.0
 
-                ver = CartpoleILQRVerify(
-                    n=cfg.n, K=k+1, T=T, r=r, dt=dt,
+                ver = CartpoleILQRPolicyVerify(
+                    T=T, r=r, dt=dt,
                     mass=1, length=1, g=9.8, rho=rho_mid,
-                    x_lo=x_min, x_hi=x_max, seed=42, verbose=False,
-                    time_limit=cfg.time_limit, V_0_max=V_0_max
+                    x_lo=x_min, x_hi=x_max, verbose=False,
+                    time_limit=cfg.time_limit,
+                    n_iters=n_iters
                 )
 
                 status, solve_time = ver.solve()
                 total_time += solve_time
 
-                print(f"T={T}, k={k+1}, rho={rho_mid:.6f}, status:", status)
+                print(f"T={T}, n_iters={n_iters}, rho={rho_mid:.6f}, status:", status)
                 sol = ver.solution_dict()
                 print("Objective:", sol["obj"])
 
                 if status == GRB.TIME_LIMIT:
-                    print(f"T={T}, k={k+1}, rho={rho_mid:.6f}: time limit exceeded, cannot certify rate")
+                    print(f"T={T}, n_iters={n_iters}, rho={rho_mid:.6f}: time limit exceeded")
                 if status == GRB.OPTIMAL:
                     rho_lo = rho_mid
                 else:
                     rho_hi = rho_mid
                     best_rho = rho_mid
                     best_sol = sol
-                # import pdb; pdb.set_trace()
 
             if best_sol is not None:
-                print(f"Best verified rho for T={T}, k={k+1}: {best_rho:.6f}")
-                opt_vals[ti, k] = rho_hi
+                print(f"Best verified rho for T={T}, n_iters={n_iters}: {best_rho:.6f}")
+                opt_vals[ti, ii] = rho_hi
             else:
-                print(f"Could not verify any rho <= {rho_max} for T={T}, k={k+1}")
-                opt_vals[ti, k] = np.inf
-            times[ti, k] = total_time
+                print(f"Could not verify any rho <= {rho_max} for T={T}, n_iters={n_iters}")
+                opt_vals[ti, ii] = np.inf
+            times[ti, ii] = total_time
 
-    k_axis = np.arange(K) + 1
     markers = ['o', 's', '^', 'D', 'v', 'p', 'h', '*']
 
     fig_rate, ax_rate = plt.subplots(figsize=(8, 5))
     for ti in range(n_T):
-        ax_rate.plot(k_axis, opt_vals[ti], marker=markers[ti % len(markers)], linewidth=2, color=colors[ti])
-    ax_rate.set_xlabel('iterations')
-    ax_rate.set_ylabel('rate')
+        ax_rate.plot(n_ilqr_iters_list, opt_vals[ti],
+                     marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
+                     label=f'T={T_vals_list[ti]}')
+    ax_rate.set_xlabel('iLQR iterations')
+    ax_rate.set_ylabel('rate $\\rho$')
+    ax_rate.legend()
     ax_rate.grid(True)
     fig_rate.tight_layout()
     fig_rate.savefig('rates_ilqr.pdf', bbox_inches='tight')
@@ -103,14 +96,253 @@ def run(cfg):
 
     fig_time, ax_time = plt.subplots(figsize=(8, 5))
     for ti in range(n_T):
-        ax_time.plot(k_axis, times[ti], marker=markers[ti % len(markers)], linewidth=2, color=colors[ti])
-    ax_time.set_xlabel('iterations $k$')
+        ax_time.plot(n_ilqr_iters_list, times[ti],
+                     marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
+                     label=f'T={T_vals_list[ti]}')
+    ax_time.set_xlabel('iLQR iterations')
     ax_time.set_ylabel('total solve time (sec)')
     ax_time.set_yscale('log')
+    ax_time.legend()
     ax_time.grid(True)
     fig_time.tight_layout()
     fig_time.savefig('times_ilqr.pdf', bbox_inches='tight')
     plt.close(fig_time)
+
+
+def _add_mpc_kkt(M, tag, x_init, T, r, dt, mass, length, g, u_max):
+    """
+    Add MPC KKT conditions to model M starting from x_init (Gurobi vars or dict).
+    Returns (x_mpc, u_mpc, cost_expr) where cost_expr = J*(x_init).
+    No state constraints; only KKT stationarity + dynamics.
+    """
+    n_x, n_u = 2, 1
+    b_u = dt / (mass * length**2)  # B[1,0]: constant control-to-thetadot gain
+
+    x_mpc = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xm_{tag}_{t}") for t in range(T + 1)}
+    u_mpc = {t: M.addVars(n_u, lb=-u_max, ub=u_max,  name=f"um_{tag}_{t}") for t in range(T)}
+    lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lm_{tag}_{t}") for t in range(T + 1)}
+    sin_m = {t: M.addVar(lb=-1, ub=1,            name=f"sin_m_{tag}_{t}") for t in range(T)}
+    cos_m = {t: M.addVar(lb=-1, ub=1,            name=f"cos_m_{tag}_{t}") for t in range(T)}
+    tdd_m = {t: M.addVar(lb=-GRB.INFINITY,       name=f"tdd_m_{tag}_{t}") for t in range(T)}
+
+    for i in range(n_x):
+        M.addConstr(x_mpc[0][i] == x_init[i], name=f"init_{tag}_{i}")
+
+    for t in range(T):
+        M.addGenConstrSin(x_mpc[t][0], sin_m[t], name=f"sin_{tag}_{t}")
+        M.addGenConstrCos(x_mpc[t][0], cos_m[t], name=f"cos_{tag}_{t}")
+        M.addConstr(x_mpc[t+1][0] == x_mpc[t][0] + dt * x_mpc[t][1],       name=f"dyn0_{tag}_{t}")
+        M.addConstr(tdd_m[t] == g/length * sin_m[t] + u_mpc[t][0] / (mass * length**2),
+                    name=f"tdd_{tag}_{t}")
+        M.addConstr(x_mpc[t+1][1] == x_mpc[t][1] + dt * tdd_m[t],          name=f"dyn1_{tag}_{t}")
+
+    for i in range(n_x):
+        M.addConstr(lam[T][i] == x_mpc[T][i], name=f"term_{tag}_{i}")  # Q=I
+
+    for t in range(T - 1, -1, -1):
+        M.addConstr(
+            lam[t][0] == x_mpc[t][0] + lam[t+1][0] + dt*g/length * cos_m[t] * lam[t+1][1],
+            name=f"back0_{tag}_{t}")
+        M.addConstr(
+            lam[t][1] == x_mpc[t][1] + dt * lam[t+1][0] + lam[t+1][1],
+            name=f"back1_{tag}_{t}")
+
+    for t in range(T):
+        M.addConstr(r * u_mpc[t][0] + b_u * lam[t+1][1] == 0, name=f"stat_{tag}_{t}")
+
+    cost = (
+        gp.quicksum(x_mpc[t][i] * x_mpc[t][i] for t in range(T + 1) for i in range(n_x))
+        + gp.quicksum(r * u_mpc[t][0] * u_mpc[t][0] for t in range(T))
+    )
+    return x_mpc, u_mpc, cost
+
+
+def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max):
+    """
+    Add n_iters of iLQR to model M.
+
+    Each iteration:
+      1. Forward pass: simulate nonlinear dynamics from x_0 with u_bar
+         (u_bar = 0 for iter 0; u_bar = u_lin from previous iter otherwise)
+      2. Linearize at forward-pass trajectory: A[t] uses cos(x_bar[t][0]), B is constant
+      3. Solve time-varying LQR on linearized system from x_0 via its KKT conditions
+
+    The bilinear terms cos_bar[t]*x_lin[t][0] and cos_bar[t]*lam[t+1][1] are handled
+    by NonConvex=2.
+
+    Returns (u_lin, x_lin): controls and states from the last LQR solve.
+    """
+    n_x, n_u = 2, 1
+    b_u = dt / (mass * length**2)
+
+    u_lin_prev = None  # None → u_bar = 0 for first iteration
+
+    for it in range(n_iters):
+        it_tag = f"{tag}_it{it}"
+
+        # ------------------------------------------------------------------
+        # 1. Forward pass: x_bar[t+1] = f(x_bar[t], u_bar[t])
+        # ------------------------------------------------------------------
+        x_bar = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xbar_{it_tag}_{t}")
+                 for t in range(T + 1)}
+        sin_bar = {t: M.addVar(lb=-1, ub=1,      name=f"sinbar_{it_tag}_{t}") for t in range(T)}
+        cos_bar = {t: M.addVar(lb=-1, ub=1,      name=f"cosbar_{it_tag}_{t}") for t in range(T)}
+        for i in range(n_x):
+            M.addConstr(x_bar[0][i] == x_0[i], name=f"fp_init_{it_tag}_{i}")
+
+        for t in range(T):
+            M.addGenConstrSin(x_bar[t][0], sin_bar[t], name=f"fp_sin_{it_tag}_{t}")
+            M.addGenConstrCos(x_bar[t][0], cos_bar[t], name=f"fp_cos_{it_tag}_{t}")
+            M.addConstr(x_bar[t+1][0] == x_bar[t][0] + dt * x_bar[t][1],
+                        name=f"fp_dyn0_{it_tag}_{t}")
+            if it == 0:
+                M.addConstr(
+                    x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t],
+                    name=f"fp_dyn1_{it_tag}_{t}")
+            else:
+                M.addConstr(
+                    x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t]
+                    + b_u * u_lin_prev[t][0],
+                    name=f"fp_dyn1_{it_tag}_{t}")
+
+        # ------------------------------------------------------------------
+        # 3. LQR solve: KKT conditions on linearized system from x_0
+        #    min  sum_t x^T Q x + u^T R u
+        #    s.t. x[t+1] = A[t] x[t] + B u[t],  x[0] = x_0
+        #    A[t] = [[1, dt], [dt*g/L*cos_bar[t], 1]],  B = [[0], [b_u]]
+        # ------------------------------------------------------------------
+        x_lin = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xlin_{it_tag}_{t}")
+                 for t in range(T + 1)}
+        u_lin = {t: M.addVars(n_u, lb=-u_max, ub=u_max, name=f"ulin_{it_tag}_{t}")
+                 for t in range(T)}
+        lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"laml_{it_tag}_{t}")
+                 for t in range(T + 1)}
+
+        for i in range(n_x):
+            M.addConstr(x_lin[0][i] == x_0[i], name=f"lqr_init_{it_tag}_{i}")
+
+        for t in range(T):
+            M.addConstr(x_lin[t+1][0] == x_lin[t][0] + dt * x_lin[t][1],
+                        name=f"lqr_dyn0_{it_tag}_{t}")
+            # bilinear: cos_bar[t] * x_lin[t][0]
+            M.addConstr(
+                x_lin[t+1][1] == dt*g/length * cos_bar[t] * x_lin[t][0]
+                + x_lin[t][1] + b_u * u_lin[t][0],
+                name=f"lqr_dyn1_{it_tag}_{t}")
+
+        for i in range(n_x):
+            M.addConstr(lam[T][i] == x_lin[T][i], name=f"lqr_term_{it_tag}_{i}")  # Q=I
+
+        for t in range(T - 1, -1, -1):
+            # lam[t] = Q x_lin[t] + A[t]^T lam[t+1]
+            # A[t]^T = [[1, dt*g/L*cos_bar[t]], [dt, 1]]
+            # bilinear: cos_bar[t] * lam[t+1][1]
+            M.addConstr(
+                lam[t][0] == x_lin[t][0] + lam[t+1][0]
+                + dt*g/length * cos_bar[t] * lam[t+1][1],
+                name=f"lqr_back0_{it_tag}_{t}")
+            M.addConstr(
+                lam[t][1] == x_lin[t][1] + dt * lam[t+1][0] + lam[t+1][1],
+                name=f"lqr_back1_{it_tag}_{t}")
+
+        for t in range(T):
+            # R u[t] + B^T lam[t+1] = 0  =>  r*u[t] + b_u*lam[t+1][1] = 0
+            M.addConstr(r * u_lin[t][0] + b_u * lam[t+1][1] == 0,
+                        name=f"lqr_stat_{it_tag}_{t}")
+
+        u_lin_prev = u_lin
+        x_lin_prev = x_lin
+
+    return u_lin_prev, x_lin_prev  # controls and states from last LQR iteration
+
+
+class CartpoleILQRPolicyVerify:
+    """
+    Verification problem for the iLQR policy (K=1).
+
+    Policy at x[0]: run n_iters of iLQR (forward pass + time-varying LQR solve),
+    apply u[0] = first control from last LQR solution.
+
+    Lyapunov function V(x) = cost of the final iLQR LQR solution from x:
+      V(x) = sum_{t=0}^T ||x_lin[t]||^2 + r * sum_{t=0}^{T-1} u_lin[t]^2
+
+    Checks feasibility of V(x[1]) - rho*V(x[0]) >= eps > 0.
+    Infeasible => contraction rate rho is certified.
+    """
+
+    def __init__(self, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
+                 rho=0.2, x_lo=0.0, x_hi=4.0, verbose=True,
+                 time_limit=None, n_iters=1):
+        n_x, n_u = 2, 1
+        u_max = 1000
+
+        M = gp.Model("cartpole_ilqr_policy_verify")
+        M.Params.OutputFlag = 1 if verbose else 0
+        M.Params.FeasibilityTol = 1e-9
+        M.Params.NonConvex = 2
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        self.model = M
+
+        # Initial state (x[0] in X_0)
+        x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
+        # Next state x[1] (free: no state constraints)
+        x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
+
+        # iLQR at x[0]: n_iters iterations; u0_ilqr applied, x0_lqr used for V_curr
+        u0_ilqr, x0_lqr = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max)
+
+        # Applied control = first step of last LQR solution at x[0]
+        u0 = M.addVars(n_u, lb=-u_max, ub=u_max, name="u0")
+        M.addConstr(u0[0] == u0_ilqr[0][0], name="apply_u")
+
+        # True nonlinear dynamics: x[1] = f(x[0], u0)
+        sin0 = M.addVar(lb=-1, ub=1,      name="sin0")
+        tdd0 = M.addVar(lb=-GRB.INFINITY, name="tdd0")
+        M.addGenConstrSin(x0[0], sin0, name="sin_dyn")
+        M.addConstr(x1[0] == x0[0] + dt * x0[1],                          name="dyn_theta")
+        M.addConstr(tdd0 == g/length * sin0 + u0[0] / (mass * length**2), name="tdd_dyn")
+        M.addConstr(x1[1] == x0[1] + dt * tdd0,                           name="dyn_thetadot")
+
+        # iLQR at x[1]: n_iters iterations; x1_lqr used for V_next
+        u1_ilqr, x1_lqr = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max)
+
+        # Lyapunov values = cost of final LQR solution trajectory
+        V_curr = (
+            gp.quicksum(x0_lqr[t][i] * x0_lqr[t][i] for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(r * u0_ilqr[t][0] * u0_ilqr[t][0] for t in range(T))
+        )
+        V_next = (
+            gp.quicksum(x1_lqr[t][i] * x1_lqr[t][i] for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(r * u1_ilqr[t][0] * u1_ilqr[t][0] for t in range(T))
+        )
+
+        # Feasibility = policy does NOT satisfy contraction with rate rho
+        eps = 1 - rho
+        # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
+        M.addConstr(V_curr >= 1e-3, name="stability")
+        M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
+        M.setObjective(0, GRB.MAXIMIZE)
+
+        self.V_curr = V_curr
+        self.V_next = V_next
+        self.x0 = x0
+        self.x1 = x1
+
+    def solve(self):
+        self.model.optimize()
+        return self.model.Status, self.model.Runtime
+
+    def solution_dict(self):
+        if self.model.SolCount == 0:
+            return {"obj": None}
+        return {
+            "obj":    self.model.ObjVal,
+            "V_curr": self.V_curr.getValue(),
+            "V_next": self.V_next.getValue(),
+            "x0":     [self.x0[i].X for i in range(2)],
+            "x1":     [self.x1[i].X for i in range(2)],
+        }
 
 
 class CartpolePhase1:
