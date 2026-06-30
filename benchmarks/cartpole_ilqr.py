@@ -27,6 +27,7 @@ def run(cfg):
     dt = cfg.dt
     mass = cfg.mass
     length = cfg.length
+    nu = cfg.nu
 
     x_min = x_mins[0]
     x_max = x_maxes[0]
@@ -40,6 +41,16 @@ def run(cfg):
     kkt_times = np.zeros(n_T)
 
     for ti, T in enumerate(T_vals_list):
+        # --- Phase 1 (KKT): upper bound on J*(x_0) ---
+        print(f"\n=== Phase 1 KKT: T={T} ===")
+        p1_kkt = CartpolePhase1(
+            T=T, r=r, dt=dt, mass=mass, length=length, g=9.8,
+            x_lo=x_min, x_hi=x_max, verbose=False, time_limit=cfg.time_limit,
+        )
+        p1_kkt.solve()
+        V_0_max_kkt = p1_kkt.V0_max()
+        print(f"  V_0_max (KKT) = {V_0_max_kkt}")
+
         # --- KKT bisection (true nonlinear MPC policy, J* Lyapunov) ---
         print(f"\n=== KKT verification: T={T} ===")
         rho_lo, rho_hi = 0.0, rho_max
@@ -51,12 +62,20 @@ def run(cfg):
                 K=1, T=T, r=r, dt=dt,
                 mass=mass, length=length, g=9.8, rho=rho_mid,
                 x_lo=x_min, x_hi=x_max, verbose=False,
-                time_limit=cfg.time_limit,
+                time_limit=cfg.time_limit, V_0_max=V_0_max_kkt,
             )
             status_kkt, t_kkt = ver_kkt.solve()
             total_kkt_time += t_kkt
             print(f"  KKT T={T}, rho={rho_mid:.6f}, status={status_kkt}")
             if status_kkt == GRB.OPTIMAL:
+                sol_kkt = ver_kkt.solution_dict()
+                x0_wc = sol_kkt["x"][0]
+                x1_wc = sol_kkt["x"][1]
+                u0_wc = sol_kkt["u"][0]
+                print(f"    worst-case x0: theta={x0_wc[0]:.4f}, theta_dot={x0_wc[1]:.4f}"
+                      f"  u0={u0_wc[0]:.4f}"
+                      f"  x1: theta={x1_wc[0]:.4f}, theta_dot={x1_wc[1]:.4f}"
+                      f"  V_curr={sol_kkt['V_curr']:.4f}, V_next={sol_kkt['V_next']:.4f}")
                 rho_lo = rho_mid
             else:
                 rho_hi = rho_mid
@@ -67,6 +86,17 @@ def run(cfg):
 
         # --- Bisection over rho for each number of iLQR iterations ---
         for ii, n_iters in enumerate(n_ilqr_iters_list):
+            # Phase 1 (iLQR): upper bound on V_ilqr(x_0) for this n_iters
+            print(f"\n=== Phase 1 iLQR: T={T}, n_iters={n_iters} ===")
+            p1_ilqr = CartpoleILQRPolicyPhase1(
+                T=T, r=r, dt=dt, mass=mass, length=length, g=9.8,
+                x_lo=x_min, x_hi=x_max, verbose=False,
+                time_limit=cfg.time_limit, n_iters=n_iters, nu=nu,
+            )
+            p1_ilqr.solve()
+            V_0_max_ilqr = p1_ilqr.V0_max()
+            print(f"  V_0_max (iLQR n_iters={n_iters}) = {V_0_max_ilqr}")
+
             rho_lo = 0.0
             rho_hi = rho_max
             best_rho = None
@@ -81,7 +111,7 @@ def run(cfg):
                     mass=mass, length=length, g=9.8, rho=rho_mid,
                     x_lo=x_min, x_hi=x_max, verbose=False,
                     time_limit=cfg.time_limit,
-                    n_iters=n_iters
+                    n_iters=n_iters, nu=nu, V_0_max=V_0_max_ilqr
                 )
 
                 status, solve_time = ver.solve()
@@ -94,6 +124,12 @@ def run(cfg):
                 if status == GRB.TIME_LIMIT:
                     print(f"T={T}, n_iters={n_iters}, rho={rho_mid:.6f}: time limit exceeded")
                 if status == GRB.OPTIMAL:
+                    x0_wc = sol["x0"]
+                    x1_wc = sol["x1"]
+                    print(f"    worst-case x0: theta={x0_wc[0]:.4f}, theta_dot={x0_wc[1]:.4f}"
+                          f"  u0={sol['u0']:.4f}"
+                          f"  x1: theta={x1_wc[0]:.4f}, theta_dot={x1_wc[1]:.4f}"
+                          f"  V_curr={sol['V_curr']:.4f}, V_next={sol['V_next']:.4f}")
                     rho_lo = rho_mid
                 else:
                     rho_hi = rho_mid
@@ -192,7 +228,7 @@ def _add_mpc_kkt(M, tag, x_init, T, r, dt, mass, length, g, u_max):
     return x_mpc, u_mpc, cost
 
 
-def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max):
+def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0.0):
     """
     Add n_iters of iLQR to model M.
 
@@ -200,7 +236,9 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max):
       1. Forward pass: simulate nonlinear dynamics from x_0 with u_bar
          (u_bar = 0 for iter 0; u_bar = u_lin from previous iter otherwise)
       2. Linearize at forward-pass trajectory: A[t] uses cos(x_bar[t][0]), B is constant
-      3. Solve time-varying LQR on linearized system from x_0 via its KKT conditions
+      3. Solve time-varying LQR with proximal regularization nu on the control update:
+           min  sum_t x^T Q x + r*u^2 + (nu/2)*||u - u_bar||^2
+         KKT stationarity: (r+nu)*u[t] - nu*u_bar[t] + b_u*lam[t+1][1] = 0
 
     The bilinear terms cos_bar[t]*x_lin[t][0] and cos_bar[t]*lam[t+1][1] are handled
     by NonConvex=2.
@@ -281,9 +319,15 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max):
                 name=f"lqr_back1_{it_tag}_{t}")
 
         for t in range(T):
-            # R u[t] + B^T lam[t+1] = 0  =>  r*u[t] + b_u*lam[t+1][1] = 0
-            M.addConstr(r * u_lin[t][0] + b_u * lam[t+1][1] == 0,
-                        name=f"lqr_stat_{it_tag}_{t}")
+            # (r+nu)*u[t] - nu*u_bar[t] + b_u*lam[t+1][1] = 0
+            # (nu=0 recovers the unregularized case; u_bar=0 for first iteration)
+            if it == 0:
+                M.addConstr((r + nu) * u_lin[t][0] + b_u * lam[t+1][1] == 0,
+                            name=f"lqr_stat_{it_tag}_{t}")
+            else:
+                M.addConstr((r + nu) * u_lin[t][0] - nu * u_lin_prev[t][0]
+                            + b_u * lam[t+1][1] == 0,
+                            name=f"lqr_stat_{it_tag}_{t}")
 
         u_lin_prev = u_lin
         x_lin_prev = x_lin
@@ -307,7 +351,7 @@ class CartpoleILQRPolicyVerify:
 
     def __init__(self, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
                  rho=0.2, x_lo=0.0, x_hi=4.0, verbose=True,
-                 time_limit=None, n_iters=1):
+                 time_limit=None, n_iters=1, nu=0.0, V_0_max=None):
         n_x, n_u = 2, 1
         u_max = 1000
 
@@ -325,7 +369,7 @@ class CartpoleILQRPolicyVerify:
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
 
         # iLQR at x[0]: n_iters iterations; u0_ilqr applied, x0_lqr used for V_curr
-        u0_ilqr, x0_lqr = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max)
+        u0_ilqr, x0_lqr = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Applied control = first step of last LQR solution at x[0]
         u0 = M.addVars(n_u, lb=-u_max, ub=u_max, name="u0")
@@ -340,7 +384,7 @@ class CartpoleILQRPolicyVerify:
         M.addConstr(x1[1] == x0[1] + dt * tdd0,                           name="dyn_thetadot")
 
         # iLQR at x[1]: n_iters iterations; x1_lqr used for V_next
-        u1_ilqr, x1_lqr = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max)
+        u1_ilqr, x1_lqr = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Lyapunov values = cost of final LQR solution trajectory
         V_curr = (
@@ -351,6 +395,10 @@ class CartpoleILQRPolicyVerify:
             gp.quicksum(x1_lqr[t][i] * x1_lqr[t][i] for t in range(T + 1) for i in range(n_x))
             + gp.quicksum(r * u1_ilqr[t][0] * u1_ilqr[t][0] for t in range(T))
         )
+
+        # Restrict to initial conditions with bounded iLQR Lyapunov value
+        if V_0_max is not None:
+            M.addConstr(V_curr <= V_0_max, name="V0_bound")
 
         # Feasibility = policy does NOT satisfy contraction with rate rho
         eps = 1 - rho
@@ -363,6 +411,7 @@ class CartpoleILQRPolicyVerify:
         self.V_next = V_next
         self.x0 = x0
         self.x1 = x1
+        self.u0 = u0
 
     def solve(self):
         self.model.optimize()
@@ -377,7 +426,52 @@ class CartpoleILQRPolicyVerify:
             "V_next": self.V_next.getValue(),
             "x0":     [self.x0[i].X for i in range(2)],
             "x1":     [self.x1[i].X for i in range(2)],
+            "u0":     self.u0[0].X,
         }
+
+
+class CartpoleILQRPolicyPhase1:
+    """
+    Phase 1 for iLQR policy: compute V_0_max = max_{x_0 in X_0} V_ilqr(x_0),
+    where V_ilqr(x_0) is the cost of the final LQR solution from x_0
+    with n_iters iLQR iterations (the same Lyapunov used in CartpoleILQRPolicyVerify).
+    """
+
+    def __init__(self, T=5, r=0.1, dt=0.1, mass=1, length=1, g=9.8,
+                 x_lo=0.0, x_hi=4.0, verbose=True, time_limit=None,
+                 n_iters=1, nu=0.0):
+        n_x = 2
+        u_max = 1000
+
+        M = gp.Model("cartpole_ilqr_policy_phase1")
+        M.Params.OutputFlag = 1 if verbose else 0
+        M.Params.FeasibilityTol = 1e-9
+        M.Params.NonConvex = 2
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        self.model = M
+
+        x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
+
+        u_ilqr, x_lqr = _add_ilqr_iters(
+            M, "ilqr", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
+
+        V_curr = (
+            gp.quicksum(x_lqr[t][i] * x_lqr[t][i]
+                        for t in range(T + 1) for i in range(n_x))
+            + gp.quicksum(r * u_ilqr[t][0] * u_ilqr[t][0] for t in range(T))
+        )
+        M.setObjective(V_curr, GRB.MAXIMIZE)
+        self.V_curr = V_curr
+
+    def solve(self):
+        self.model.optimize()
+        return self.model.Status, self.model.Runtime
+
+    def V0_max(self):
+        if self.model.SolCount == 0:
+            return None
+        return self.model.ObjVal
 
 
 class CartpolePhase1:
@@ -756,8 +850,9 @@ class CartpoleILQRVerify:
             + gp.quicksum(R[j, j] * self.u_mpc_var[K][t][j] * self.u_mpc_var[K][t][j]
                             for t in range(T) for j in range(n_u))
         )
-        # # Restrict to initial conditions reachable under the MPC policy
-        # M.addConstr(V_curr <= V_0_max, name="V0_bound")
+        # Restrict to initial conditions reachable under the MPC policy
+        if V_0_max is not None:
+            M.addConstr(V_curr <= V_0_max, name="V0_bound")
 
         # V_curr = gp.quicksum(self.x[0][i] * self.x[0][i] for i in range(n_x))
         # V_next = gp.quicksum(self.x[K][i] * self.x[K][i] for i in range(n_x))
