@@ -34,8 +34,35 @@ def run(cfg):
     n_iters_axis = len(n_ilqr_iters_list)
     times    = np.zeros((n_T, n_iters_axis))
     opt_vals = np.zeros((n_T, n_iters_axis))
+    kkt_rhos  = np.zeros(n_T)
+    kkt_times = np.zeros(n_T)
 
     for ti, T in enumerate(T_vals_list):
+        # --- KKT bisection (true nonlinear MPC policy, J* Lyapunov) ---
+        print(f"\n=== KKT verification: T={T} ===")
+        rho_lo, rho_hi = 0.0, rho_max
+        best_kkt_rho = None
+        total_kkt_time = 0.0
+        while rho_hi - rho_lo > cfg.tol:
+            rho_mid = (rho_lo + rho_hi) / 2.0
+            ver_kkt = CartpoleILQRVerify(
+                K=1, T=T, r=r, dt=dt,
+                mass=1, length=1, g=9.8, rho=rho_mid,
+                x_lo=x_min, x_hi=x_max, verbose=False,
+                time_limit=cfg.time_limit,
+            )
+            status_kkt, t_kkt = ver_kkt.solve()
+            total_kkt_time += t_kkt
+            print(f"  KKT T={T}, rho={rho_mid:.6f}, status={status_kkt}")
+            if status_kkt == GRB.OPTIMAL:
+                rho_lo = rho_mid
+            else:
+                rho_hi = rho_mid
+                best_kkt_rho = rho_mid
+        kkt_rhos[ti]  = rho_hi
+        kkt_times[ti] = total_kkt_time
+        print(f"  KKT certified rho={rho_hi:.6f}, time={total_kkt_time:.1f}s")
+
         # --- Bisection over rho for each number of iLQR iterations ---
         for ii, n_iters in enumerate(n_ilqr_iters_list):
             rho_lo = 0.0
@@ -83,9 +110,12 @@ def run(cfg):
 
     fig_rate, ax_rate = plt.subplots(figsize=(8, 5))
     for ti in range(n_T):
+        color = colors[ti]
         ax_rate.plot(n_ilqr_iters_list, opt_vals[ti],
-                     marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
-                     label=f'T={T_vals_list[ti]}')
+                     marker=markers[ti % len(markers)], linewidth=2, color=color,
+                     label=f'iLQR T={T_vals_list[ti]}')
+        ax_rate.axhline(kkt_rhos[ti], color=color, linewidth=1.5, linestyle='--',
+                        label=f'KKT T={T_vals_list[ti]}')
     ax_rate.set_xlabel('iLQR iterations')
     ax_rate.set_ylabel('rate $\\rho$')
     ax_rate.legend()
@@ -96,9 +126,12 @@ def run(cfg):
 
     fig_time, ax_time = plt.subplots(figsize=(8, 5))
     for ti in range(n_T):
+        color = colors[ti]
         ax_time.plot(n_ilqr_iters_list, times[ti],
-                     marker=markers[ti % len(markers)], linewidth=2, color=colors[ti],
-                     label=f'T={T_vals_list[ti]}')
+                     marker=markers[ti % len(markers)], linewidth=2, color=color,
+                     label=f'iLQR T={T_vals_list[ti]}')
+        ax_time.axhline(kkt_times[ti], color=color, linewidth=1.5, linestyle='--',
+                        label=f'KKT T={T_vals_list[ti]}')
     ax_time.set_xlabel('iLQR iterations')
     ax_time.set_ylabel('total solve time (sec)')
     ax_time.set_yscale('log')
