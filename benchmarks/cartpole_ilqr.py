@@ -25,6 +25,8 @@ def run(cfg):
     n_ilqr_iters_list = list(cfg.n_ilqr_iters)
     r = cfg.r
     dt = cfg.dt
+    mass = cfg.mass
+    length = cfg.length
 
     x_min = x_mins[0]
     x_max = x_maxes[0]
@@ -47,7 +49,7 @@ def run(cfg):
             rho_mid = (rho_lo + rho_hi) / 2.0
             ver_kkt = CartpoleILQRVerify(
                 K=1, T=T, r=r, dt=dt,
-                mass=1, length=1, g=9.8, rho=rho_mid,
+                mass=mass, length=length, g=9.8, rho=rho_mid,
                 x_lo=x_min, x_hi=x_max, verbose=False,
                 time_limit=cfg.time_limit,
             )
@@ -76,7 +78,7 @@ def run(cfg):
 
                 ver = CartpoleILQRPolicyVerify(
                     T=T, r=r, dt=dt,
-                    mass=1, length=1, g=9.8, rho=rho_mid,
+                    mass=mass, length=length, g=9.8, rho=rho_mid,
                     x_lo=x_min, x_hi=x_max, verbose=False,
                     time_limit=cfg.time_limit,
                     n_iters=n_iters
