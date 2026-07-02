@@ -270,17 +270,17 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
         for t in range(T):
             M.addGenConstrSin(x_bar[t][0], sin_bar[t], name=f"fp_sin_{it_tag}_{t}")
             M.addGenConstrCos(x_bar[t][0], cos_bar[t], name=f"fp_cos_{it_tag}_{t}")
-            M.addConstr(x_bar[t+1][0] == x_bar[t][0] + dt * x_bar[t][1],
-                        name=f"fp_dyn0_{it_tag}_{t}")
-            if it == 0:
-                M.addConstr(
-                    x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t],
-                    name=f"fp_dyn1_{it_tag}_{t}")
-            else:
-                M.addConstr(
-                    x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t]
-                    + b_u * u_lin_prev[t][0],
-                    name=f"fp_dyn1_{it_tag}_{t}")
+            # M.addConstr(x_bar[t+1][0] == x_bar[t][0] + dt * x_bar[t][1],
+            #             name=f"fp_dyn0_{it_tag}_{t}")
+            # if it == 0:
+            #     M.addConstr(
+            #         x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t],
+            #         name=f"fp_dyn1_{it_tag}_{t}")
+            # else:
+            #     M.addConstr(
+            #         x_bar[t+1][1] == x_bar[t][1] + dt * g/length * sin_bar[t]
+            #         + b_u * u_lin_prev[t][0],
+            #         name=f"fp_dyn1_{it_tag}_{t}")
 
         # ------------------------------------------------------------------
         # 3. LQR solve: KKT conditions on linearized system from x_0
@@ -302,11 +302,18 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
             M.addConstr(x_lin[t+1][0] == x_lin[t][0] + dt * x_lin[t][1],
                         name=f"lqr_dyn0_{it_tag}_{t}")
             # bilinear: cos_bar[t]*x_lin[t][0] and cos_bar[t]*x_bar[t][0] (affine offset)
+            # M.addConstr(
+            #     x_lin[t+1][1] == dt*g/length * cos_bar[t] * x_lin[t][0]
+            #     + x_lin[t][1] + b_u * u_lin[t][0]
+            #     + dt*g/length * sin_bar[t]
+            #     - dt*g/length * cos_bar[t] * x_bar[t][0],
+            #     name=f"lqr_dyn1_{it_tag}_{t}")
             M.addConstr(
-                x_lin[t+1][1] == dt*g/length * cos_bar[t] * x_lin[t][0]
+                x_lin[t+1][1] == dt*g/length * cos_bar[0] * x_lin[t][0]
                 + x_lin[t][1] + b_u * u_lin[t][0]
-                + dt*g/length * sin_bar[t]
-                - dt*g/length * cos_bar[t] * x_bar[t][0],
+                + dt*g/length * sin_bar[0]
+                # - dt*g/length * cos_bar[0] * x_bar[t][0],
+                - dt*g/length * cos_bar[0] * x_bar[0][0],
                 name=f"lqr_dyn1_{it_tag}_{t}")
 
         for i in range(n_x):
@@ -316,9 +323,16 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
             # lam[t] = Q x_lin[t] + A[t]^T lam[t+1]
             # A[t]^T = [[1, dt*g/L*cos_bar[t]], [dt, 1]]
             # bilinear: cos_bar[t] * lam[t+1][1]
+            # M.addConstr(
+            #     lam[t][0] == x_lin[t][0] + lam[t+1][0]
+            #     + dt*g/length * cos_bar[t] * lam[t+1][1],
+            #     name=f"lqr_back0_{it_tag}_{t}")
+            # M.addConstr(
+            #     lam[t][1] == x_lin[t][1] + dt * lam[t+1][0] + lam[t+1][1],
+            #     name=f"lqr_back1_{it_tag}_{t}")
             M.addConstr(
                 lam[t][0] == x_lin[t][0] + lam[t+1][0]
-                + dt*g/length * cos_bar[t] * lam[t+1][1],
+                + dt*g/length * cos_bar[0] * lam[t+1][1],
                 name=f"lqr_back0_{it_tag}_{t}")
             M.addConstr(
                 lam[t][1] == x_lin[t][1] + dt * lam[t+1][0] + lam[t+1][1],

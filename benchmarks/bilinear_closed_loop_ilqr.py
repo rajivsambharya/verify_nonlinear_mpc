@@ -67,12 +67,12 @@ def run(cfg):
                           x0_lo=x0_lo, x0_hi=x0_hi, sys=sys,
                           verbose=False, time_limit=cfg.time_limit)
 
-            # print(f"=== KKT j={j} T={T} ===")
-            # kkt = BilinearKKTSubopt(**common)
-            # st, tt = kkt.solve()
-            # sd = kkt.solution_dict()
-            # kkt_results[(T, j)] = {'subopt': sd['subopt'], 'time': tt}
-            # print(f"  subopt={sd['subopt']}")
+            print(f"=== KKT j={j} T={T} ===")
+            kkt = BilinearKKTSubopt(**common)
+            st, tt = kkt.solve()
+            sd = kkt.solution_dict()
+            kkt_results[(T, j)] = {'subopt': sd['subopt'], 'time': tt}
+            print(f"  subopt={sd['subopt']}")
 
             for n in n_iters_list:
                 print(f"=== iLQR N={n} j={j} T={T} ===")
