@@ -1,0 +1,12 @@
+T_vals: [2, 5, 10, 12]
+n_scp_iters: [1, 2]
+trust_region_size: 1 #10.0
+dt: 0.01
+r: 0.0
+time_limit: 1000
+rho_max: 5
+x_mins: [-1.]
+x_maxes: [1.]
+tol: 1e-5
+mass: 1
+length: 1

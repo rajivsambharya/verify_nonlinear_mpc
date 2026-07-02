@@ -130,6 +130,9 @@ def run(cfg):
                           f"  u0={sol['u0']:.4f}"
                           f"  x1: theta={x1_wc[0]:.4f}, theta_dot={x1_wc[1]:.4f}"
                           f"  V_curr={sol['V_curr']:.4f}, V_next={sol['V_next']:.4f}")
+                    if n_iters >= 2:
+                        u0s = ", ".join(f"{u:.4f}" for u in sol["u0_per_iter"])
+                        print(f"    u0 per iter: [{u0s}]")
                     rho_lo = rho_mid
                 else:
                     rho_hi = rho_mid
@@ -249,6 +252,7 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
     b_u = dt / (mass * length**2)
 
     u_lin_prev = None  # None → u_bar = 0 for first iteration
+    u0_all_iters = []  # u_lin[0][0] for each iteration, for post-solve inspection
 
     for it in range(n_iters):
         it_tag = f"{tag}_it{it}"
@@ -297,10 +301,12 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
         for t in range(T):
             M.addConstr(x_lin[t+1][0] == x_lin[t][0] + dt * x_lin[t][1],
                         name=f"lqr_dyn0_{it_tag}_{t}")
-            # bilinear: cos_bar[t] * x_lin[t][0]
+            # bilinear: cos_bar[t]*x_lin[t][0] and cos_bar[t]*x_bar[t][0] (affine offset)
             M.addConstr(
                 x_lin[t+1][1] == dt*g/length * cos_bar[t] * x_lin[t][0]
-                + x_lin[t][1] + b_u * u_lin[t][0],
+                + x_lin[t][1] + b_u * u_lin[t][0]
+                + dt*g/length * sin_bar[t]
+                - dt*g/length * cos_bar[t] * x_bar[t][0],
                 name=f"lqr_dyn1_{it_tag}_{t}")
 
         for i in range(n_x):
@@ -329,10 +335,11 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
                             + b_u * lam[t+1][1] == 0,
                             name=f"lqr_stat_{it_tag}_{t}")
 
+        u0_all_iters.append(u_lin[0][0])
         u_lin_prev = u_lin
         x_lin_prev = x_lin
 
-    return u_lin_prev, x_lin_prev  # controls and states from last LQR iteration
+    return u_lin_prev, x_lin_prev, u0_all_iters
 
 
 class CartpoleILQRPolicyVerify:
@@ -369,7 +376,7 @@ class CartpoleILQRPolicyVerify:
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
 
         # iLQR at x[0]: n_iters iterations; u0_ilqr applied, x0_lqr used for V_curr
-        u0_ilqr, x0_lqr = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
+        u0_ilqr, x0_lqr, u0_iters = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Applied control = first step of last LQR solution at x[0]
         u0 = M.addVars(n_u, lb=-u_max, ub=u_max, name="u0")
@@ -384,7 +391,7 @@ class CartpoleILQRPolicyVerify:
         M.addConstr(x1[1] == x0[1] + dt * tdd0,                           name="dyn_thetadot")
 
         # iLQR at x[1]: n_iters iterations; x1_lqr used for V_next
-        u1_ilqr, x1_lqr = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
+        u1_ilqr, x1_lqr, _ = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Lyapunov values = cost of final LQR solution trajectory
         V_curr = (
@@ -407,11 +414,12 @@ class CartpoleILQRPolicyVerify:
         M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
         M.setObjective(0, GRB.MAXIMIZE)
 
-        self.V_curr = V_curr
-        self.V_next = V_next
-        self.x0 = x0
-        self.x1 = x1
-        self.u0 = u0
+        self.V_curr   = V_curr
+        self.V_next   = V_next
+        self.x0       = x0
+        self.x1       = x1
+        self.u0       = u0
+        self.u0_iters = u0_iters  # u_lin[0][0] per iLQR iteration at x[0]
 
     def solve(self):
         self.model.optimize()
@@ -421,12 +429,13 @@ class CartpoleILQRPolicyVerify:
         if self.model.SolCount == 0:
             return {"obj": None}
         return {
-            "obj":    self.model.ObjVal,
-            "V_curr": self.V_curr.getValue(),
-            "V_next": self.V_next.getValue(),
-            "x0":     [self.x0[i].X for i in range(2)],
-            "x1":     [self.x1[i].X for i in range(2)],
-            "u0":     self.u0[0].X,
+            "obj":         self.model.ObjVal,
+            "V_curr":      self.V_curr.getValue(),
+            "V_next":      self.V_next.getValue(),
+            "x0":          [self.x0[i].X for i in range(2)],
+            "x1":          [self.x1[i].X for i in range(2)],
+            "u0":          self.u0[0].X,
+            "u0_per_iter": [v.X for v in self.u0_iters],
         }
 
 
@@ -453,7 +462,7 @@ class CartpoleILQRPolicyPhase1:
 
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
 
-        u_ilqr, x_lqr = _add_ilqr_iters(
+        u_ilqr, x_lqr, _ = _add_ilqr_iters(
             M, "ilqr", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         V_curr = (

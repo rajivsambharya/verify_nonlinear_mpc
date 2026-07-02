@@ -38,25 +38,23 @@ plt.rc("ytick", labelsize=FONT_SIZE, labelcolor="black")
 
 def run(cfg):
     """
-    Closed-loop suboptimality for the bilinear system:
-      x+[0] = 0.9*x[0] + u + 0.2*u*x[0]
-      x+[1] = 0.7*x[1] + 0.5*x[0]
-
-    For each j and T, computes max_{x_0 in X_0} [J_policy(x_0) - J_opt(x_0)]
-    for two policies:
-      1. True nonlinear MPC (exact KKT)
-      2. 1-iteration SCP MPC (linearize at current state, u_lin=0)
+    For each (T, j), compute max_{x_0 in X_0} [J_policy(x_0) - J_opt(x_0)]
+    for:
+      - KKT: true nonlinear MPC (constrained, exact KKT)
+      - SCP N: N-iteration SCP with trust region |u[t]-u_bar[t]| <= trust_region_size
     """
-    j_vals = list(cfg.j_vals)
-    T_vals = list(cfg.T_vals)
-    r_cost = cfg.r_cost
-    x0_lo = cfg.x0_mins[0]
-    x0_hi = cfg.x0_maxes[0]
-    u_bound = cfg.u_bound
-    sys = BilinearSystem(a00=cfg.a00, a10=cfg.a10, a11=cfg.a11, b=cfg.b)
+    j_vals           = list(cfg.j_vals)
+    T_vals           = list(cfg.T_vals)
+    n_scp_iters_list = list(cfg.n_scp_iters)
+    trust_region     = cfg.trust_region_size
+    r_cost           = cfg.r_cost
+    x0_lo            = cfg.x0_mins[0]
+    x0_hi            = cfg.x0_maxes[0]
+    u_bound          = cfg.u_bound
+    sys              = BilinearSystem(a00=cfg.a00, a10=cfg.a10, a11=cfg.a11, b=cfg.b)
 
-    mpc_results = {}
-    scp_results = {}
+    kkt_results = {}
+    scp_results = {n: {} for n in n_scp_iters_list}
 
     for T in T_vals:
         for j in j_vals:
@@ -67,78 +65,73 @@ def run(cfg):
                 time_limit=cfg.time_limit,
             )
 
-            # True MPC suboptimality
             print(f"=== KKT suboptimality: j={j}, T={T} ===")
-            mpc_prob = BilinearMaxStateNorm(**common_kwargs)
-            status_m, t_m = mpc_prob.solve()
-            sol_m = mpc_prob.solution_dict()
-            mpc_results[(T, j)] = {'subopt': sol_m['subopt'], 'status': status_m, 'time': t_m}
+            kkt_prob = BilinearMaxStateNorm(**common_kwargs)
+            status_m, t_m = kkt_prob.solve()
+            sol_m = kkt_prob.solution_dict()
+            kkt_results[(T, j)] = {'subopt': sol_m['subopt'], 'status': status_m, 'time': t_m}
             print(f"  subopt={sol_m['subopt']}")
 
-            # SCP suboptimality (2 iterations)
-            print(f"=== SCP suboptimality: j={j}, T={T} ===")
-            scp_prob = BilinearSCPSubopt(**common_kwargs, n_iters=1)
-            status_s, t_s = scp_prob.solve()
-            sol_s = scp_prob.solution_dict()
-            scp_results[(T, j)] = {'subopt': sol_s['subopt'], 'status': status_s, 'time': t_s}
-            print(f"  subopt={sol_s['subopt']}")
-            # import pdb; pdb.set_trace()
+            for n in n_scp_iters_list:
+                print(f"=== SCP N={n} suboptimality: j={j}, T={T} ===")
+                scp_prob = BilinearSCPSubopt(
+                    **common_kwargs, n_iters=n, trust_region=trust_region)
+                status_s, t_s = scp_prob.solve()
+                sol_s = scp_prob.solution_dict()
+                scp_results[n][(T, j)] = {
+                    'subopt': sol_s['subopt'], 'status': status_s, 'time': t_s}
+                print(f"  subopt={sol_s['subopt']}")
 
-    # Summary
     print("\n=== Summary ===")
     for T in T_vals:
         for j in j_vals:
-            m = mpc_results[(T, j)]
-            s = scp_results[(T, j)]
+            m = kkt_results[(T, j)]
             m_str = f"{m['subopt']:.4f}" if m['subopt'] is not None else "N/A"
-            s_str = f"{s['subopt']:.4f}" if s['subopt'] is not None else "N/A"
-            print(f"  T={T}, j={j}: MPC={m_str}  SCP={s_str}")
+            line = f"  T={T}, j={j}: KKT={m_str}"
+            for n in n_scp_iters_list:
+                s = scp_results[n][(T, j)]
+                s_str = f"{s['subopt']:.4f}" if s['subopt'] is not None else "N/A"
+                line += f"  SCP(N={n})={s_str}"
+            print(line)
 
-    j_axis = list(j_vals)
+    for T in T_vals:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        j_axis = [j for j in j_vals if j > 0]
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for ti, T in enumerate(T_vals):
-        mpc_vals = [
-            mpc_results[(T, j)]['subopt'] if mpc_results[(T, j)]['subopt'] is not None
-            else float('nan') for j in j_vals
+        kkt_vals = [
+            kkt_results[(T, j)]['subopt'] if kkt_results[(T, j)]['subopt'] is not None
+            else float('nan') for j in j_axis
         ]
-        scp_vals = [
-            scp_results[(T, j)]['subopt'] if scp_results[(T, j)]['subopt'] is not None
-            else float('nan') for j in j_vals
-        ]
-        color = colors[ti % len(colors)]
-        ax.plot(j_axis[1:], mpc_vals[1:],
-                marker=markers[ti % len(markers)], linewidth=2, color=color,
-                linestyle='-', label=f'MPC T={T}')
-        ax.plot(j_axis[1:], scp_vals[1:],
-                marker=markers[ti % len(markers)], linewidth=2, color=color,
-                linestyle='--', label=f'SCP T={T}')
-    ax.set_xlabel('step $j$')
-    ax.set_yscale('log')
-    ax.set_ylabel('closed-loop suboptimality')
-    # ax.legend()
-    ax.grid(True)
-    fig.tight_layout()
-    fig.savefig('bilinear_closed-loop_suboptimality.pdf', bbox_inches='tight')
-    plt.close(fig)
+        ax.plot(j_axis, kkt_vals,
+                marker=markers[0], linewidth=2.5, color='k',
+                linestyle='-', label='KKT')
+
+        for ci, n in enumerate(n_scp_iters_list):
+            vals = [
+                scp_results[n][(T, j)]['subopt'] if scp_results[n][(T, j)]['subopt'] is not None
+                else float('nan') for j in j_axis
+            ]
+            ax.plot(j_axis, vals,
+                    marker=markers[(ci + 1) % len(markers)],
+                    linewidth=2, color=colors[ci],
+                    linestyle='--', label=f'SCP $N={n}$')
+
+        ax.set_xlabel('step $j$')
+        ax.set_yscale('log')
+        ax.set_ylabel('closed-loop suboptimality')
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
+        fig.savefig(f'bilinear_scp_subopt_T{T}.pdf', bbox_inches='tight')
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Bilinear system constants
-#   x+[0] = 0.9*x[0] + u + 0.2*u*x[0]
-#   x+[1] = 0.7*x[1] + 0.5*x[0]
-# SCP linearizes at (x_k, u=0):
-#   A = [[0.9, 0], [0.5, 0.7]]   (constant)
-#   B(x_k) = [[1 + 0.2*x_k[0]], [0]]   (depends on x_k[0])
-#
-# Steady-state gain x[1]/x[0] = 0.5/(1-0.7) = 1.67, within x_feas=2.
+# One SCP iteration: KKT conditions of the linearized QP
 # ---------------------------------------------------------------------------
 
-# A_LIN = np.array([[0.9, 0.0], [0.5, 0.7]])   # constant A
-# A^T = [[0.9, 0.5], [0.0, 0.7]]
-
-
-def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys):
+def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys,
+                      trust_region=None):
     """
     Add one SCP iteration KKT block to model M.
 
@@ -148,27 +141,33 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys):
       c[t] = [-b*u_bar[t]*x_bar[t][0], 0]
 
     x_bar[t] and u_bar[t] may be Gurobi variables (NonConvex=2).
-    Returns (x_m, u_m): full solution trajectory dicts.
+
+    If trust_region is not None, adds trust region |u[t] - u_bar[t]| <= trust_region
+    with full KKT conditions (multipliers nu_up, nu_lo and complementarity).
+
+    Returns (x_m, u_m): solution trajectory dicts.
     """
     n_x, n_u = 2, 1
     Q = np.eye(n_x)
     a00, a10, a11, b = sys.a00, sys.a10, sys.a11, sys.b
 
-    x_m = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xm_{tag}_{t}")
-           for t in range(T + 1)}
-    u_m = {t: M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"um_{tag}_{t}")
-           for t in range(T)}
-    lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lam_{tag}_{t}")
-           for t in range(T + 1)}
+    x_m   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xm_{tag}_{t}")
+              for t in range(T + 1)}
+    u_m   = {t: M.addVars(n_u, lb=-u_bound, ub=u_bound, name=f"um_{tag}_{t}")
+              for t in range(T)}
+    lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lam_{tag}_{t}")
+              for t in range(T + 1)}
     mu_up = {t: M.addVar(lb=0.0, name=f"mu_up_{tag}_{t}") for t in range(T)}
     mu_lo = {t: M.addVar(lb=0.0, name=f"mu_lo_{tag}_{t}") for t in range(T)}
+
+    if trust_region is not None:
+        nu_up = {t: M.addVar(lb=0.0, name=f"nu_up_{tag}_{t}") for t in range(T)}
+        nu_lo = {t: M.addVar(lb=0.0, name=f"nu_lo_{tag}_{t}") for t in range(T)}
 
     for i in range(n_x):
         M.addConstr(x_m[0][i] == x_k[i], name=f"init_{tag}_{i}")
 
-    # Linearized dynamics:
-    #   x_m[t+1][0] = (a00 + b*ub)*x_m[t][0] + (1 + b*xb0)*u_m[t][0] - b*ub*xb0
-    #   x_m[t+1][1] = a10*x_m[t][0] + a11*x_m[t][1]
+    # Linearized dynamics and trust region primal feasibility
     for t in range(T):
         xb0 = x_bar[t][0]
         ub  = u_bar[t]
@@ -180,11 +179,13 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys):
         M.addConstr(
             x_m[t+1][1] == a10*x_m[t][0] + a11*x_m[t][1],
             name=f"dyn1_{tag}_{t}")
+        if trust_region is not None:
+            M.addConstr(u_m[t][0] - ub <= trust_region,  name=f"tr_up_{tag}_{t}")
+            M.addConstr(ub - u_m[t][0] <= trust_region,  name=f"tr_lo_{tag}_{t}")
 
-    # KKT terminal costate (no state constraints)
+    # KKT terminal costate
     for i in range(n_x):
-        M.addConstr(lam[T][i] == Q[i, i]*x_m[T][i],
-                    name=f"term_{tag}_{i}")
+        M.addConstr(lam[T][i] == Q[i, i]*x_m[T][i], name=f"term_{tag}_{i}")
 
     # KKT backward costate: A[t]^T = [[a00 + b*ub, a10], [0, a11]]
     for t in range(T - 1, 0, -1):
@@ -195,27 +196,40 @@ def _add_one_scp_iter(M, tag, x_k, x_bar, u_bar, T, r_cost, u_bound, sys):
             + a10*lam[t+1][1],
             name=f"back0_{tag}_{t}")
         M.addConstr(
-            lam[t][1] == Q[1, 1]*x_m[t][1]
-            + a11*lam[t+1][1],
+            lam[t][1] == Q[1, 1]*x_m[t][1] + a11*lam[t+1][1],
             name=f"back1_{tag}_{t}")
 
-    # KKT stationarity: r_cost*u + (1 + b*xb0)*lam[t+1][0] + mu_up - mu_lo = 0
+    # KKT stationarity: r*u + B[t]^T*lam[t+1] + mu_up - mu_lo [+ nu_up - nu_lo] = 0
     for t in range(T):
         xb0 = x_bar[t][0]
-        M.addConstr(
-            r_cost*u_m[t][0]
-            + lam[t+1][0] + b*xb0*lam[t+1][0]
-            + mu_up[t] - mu_lo[t] == 0,
-            name=f"stat_{tag}_{t}")
+        stat = (r_cost*u_m[t][0]
+                + lam[t+1][0] + b*xb0*lam[t+1][0]
+                + mu_up[t] - mu_lo[t])
+        if trust_region is not None:
+            stat = stat + nu_up[t] - nu_lo[t]
+        M.addConstr(stat == 0, name=f"stat_{tag}_{t}")
 
+    # Box constraint complementarity
     for t in range(T):
-        M.addConstr(mu_up[t]*(u_m[t][0] - u_bound) == 0, name=f"cup_{tag}_{t}")
+        M.addConstr(mu_up[t]*(u_m[t][0] - u_bound) == 0,  name=f"cup_{tag}_{t}")
         M.addConstr(mu_lo[t]*(-u_bound - u_m[t][0]) == 0, name=f"clo_{tag}_{t}")
+
+    # Trust region complementarity
+    if trust_region is not None:
+        for t in range(T):
+            ub = u_bar[t]
+            M.addConstr(
+                nu_up[t]*(u_m[t][0] - ub - trust_region) == 0,
+                name=f"trup_{tag}_{t}")
+            M.addConstr(
+                nu_lo[t]*(-trust_region - u_m[t][0] + ub) == 0,
+                name=f"trlo_{tag}_{t}")
 
     return x_m, u_m
 
 
-def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys, n_iters=2):
+def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys, n_iters=2,
+                   trust_region=None):
     """
     Build j steps of SCP MPC chain using n_iters SCP iterations per step.
 
@@ -232,17 +246,18 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys, n_iters=2):
     x_chain[0] = M.addVars(n_x, lb=x0_lo, ub=x0_hi, name="xc_0")
 
     for k in range(j):
-        x_k = x_chain[k]
+        x_k    = x_chain[k]
         u_prev = 0.0 if k == 0 else u_chain[k - 1]
-        x_bar = {t: x_k for t in range(T)}
-        u_bar = {t: u_prev for t in range(T)}
+        x_bar  = {t: x_k   for t in range(T)}
+        u_bar  = {t: u_prev for t in range(T)}
 
         x_sol, u_sol = None, None
         for it in range(n_iters):
             x_sol, u_sol = _add_one_scp_iter(
                 M, tag=f"{k}_{it}", x_k=x_k,
                 x_bar=x_bar, u_bar=u_bar,
-                T=T, r_cost=r_cost, u_bound=u_bound, sys=sys)
+                T=T, r_cost=r_cost, u_bound=u_bound, sys=sys,
+                trust_region=trust_region)
             x_bar = {t: x_sol[t] for t in range(T)}
             u_bar = {t: u_sol[t][0] for t in range(T)}
 
@@ -259,10 +274,8 @@ def _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys, n_iters=2):
     return x_chain, u_chain
 
 
-
-
 # ---------------------------------------------------------------------------
-# Helper: true (nonlinear) MPC chain for BilinearMaxStateNorm
+# True (nonlinear) MPC chain for BilinearMaxStateNorm
 # ---------------------------------------------------------------------------
 
 def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
@@ -293,8 +306,8 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
                  for t in range(T)}
         mu_up = {t: M.addVars(n_u, lb=0.0, name=f"muc_up_{k}_{t}") for t in range(T)}
         mu_lo = {t: M.addVars(n_u, lb=0.0, name=f"muc_lo_{k}_{t}") for t in range(T)}
-        lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lamc_{k}_{t}")
-               for t in range(T + 1)}
+        lam   = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lamc_{k}_{t}")
+                 for t in range(T + 1)}
 
         for i in range(n_x):
             M.addConstr(x_mpc[0][i] == x_chain[k][i], name=f"mc_init_{k}_{i}")
@@ -308,11 +321,9 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
                 x_mpc[t+1][1] == a11*x_mpc[t][1] + a10*x_mpc[t][0],
                 name=f"cdyn1_{k}_{t}")
 
-        # KKT terminal costate (no state constraints)
         for i in range(n_x):
             M.addConstr(lam[T][i] == Q[i, i] * x_mpc[T][i], name=f"tc_{k}_{i}")
 
-        # Backward costate: df/dx^T * lam, df/du = (1 + b*x[0])
         for t in range(T - 1, 0, -1):
             M.addConstr(
                 lam[t][0] == Q[0, 0] * x_mpc[t][0]
@@ -329,7 +340,7 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
                 + lam[t+1][0] + b*x_mpc[t][0]*lam[t+1][0]
                 + mu_up[t][0] - mu_lo[t][0] == 0,
                 name=f"statc_{k}_{t}")
-            M.addConstr(mu_up[t][0] * (u_mpc[t][0] - u_bound) == 0, name=f"cup_c_{k}_{t}")
+            M.addConstr(mu_up[t][0] * (u_mpc[t][0] - u_bound) == 0,  name=f"cup_c_{k}_{t}")
             M.addConstr(mu_lo[t][0] * (-u_bound - u_mpc[t][0]) == 0, name=f"clo_c_{k}_{t}")
 
         M.addConstr(u_k[0] == u_mpc[0][0], name=f"link_{k}")
@@ -345,17 +356,15 @@ def _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys):
 
 
 # ---------------------------------------------------------------------------
-# Max ||x_j||_inf — worst-case state magnitude at step j under true MPC
+# KKT closed-loop suboptimality
 # ---------------------------------------------------------------------------
 
 class BilinearMaxStateNorm:
     """
-    Outer problem: max_{x_0 in X_0} ||x_j||_inf
-    subject to the same j-step true MPC chain (x_t in X_feas for t=1..j).
+    max_{x_0 in X_0} [J_kkt(x_0) - J_opt(x_0)]
 
-    Decomposes into 2*n_x sub-problems (one per component/sign):
-        max_{x_0}  sign * x_chain[j][i]
-    and returns the largest value found.
+    J_kkt: j-step cost under true nonlinear MPC (constrained exact KKT)
+    J_opt: j-step cost under globally optimal constrained policy (Gurobi finds best u_opt)
     """
 
     def __init__(self, j=0, T=5, r_cost=0.1,
@@ -375,7 +384,6 @@ class BilinearMaxStateNorm:
 
         xc, uc = _add_true_mpc_chain(M, j, T, r_cost, x0_lo, x0_hi, u_bound, sys)
 
-        # Unconstrained optimal chain (same x_0, free dynamics)
         x_opt = {0: xc[0]}
         u_opt = {}
         for t in range(1, j + 1):
@@ -407,7 +415,7 @@ class BilinearMaxStateNorm:
         return [M.Status for M, *_ in self._subs], t_total
 
     def solution_dict(self):
-        for M, xc, uc, x_opt, u_opt, i, sign in self._subs:
+        for M, xc, uc, x_opt, u_opt, *_ in self._subs:
             if M.SolCount == 0:
                 return {'subopt': None}
             return {
@@ -421,25 +429,21 @@ class BilinearMaxStateNorm:
 
 
 # ---------------------------------------------------------------------------
-# SCP closed-loop suboptimality: max J_scp(x_0) - J_opt(x_0)
+# SCP closed-loop suboptimality
 # ---------------------------------------------------------------------------
 
 class BilinearSCPSubopt:
     """
-    Outer problem: max_{x_0 in X_0} [J_scp(x_0) - J_opt(x_0)]
+    max_{x_0 in X_0} [J_scp(x_0) - J_opt(x_0)]
 
-    J_scp:  j-step cost under 1-iter SCP policy (linearize at x_k, u_lin=0)
-    J_opt:  j-step cost under optimal (true nonlinear MPC) policy
-
-    Both policies propagate true nonlinear dynamics.
-    The SCP inner QP is convex (linearized dynamics, fixed x_k) and its KKT
-    conditions are linear in inner variables — bilinear terms arise only
-    from x_k being an outer variable.
+    J_scp: j-step cost under n_iters-iteration SCP policy with trust region
+    J_opt: j-step cost under globally optimal constrained policy
     """
 
     def __init__(self, j=0, T=5, r_cost=0.1,
                  x0_lo=-1.0, x0_hi=1.0,
-                 u_bound=1.0, sys=None, verbose=True, time_limit=None, n_iters=2):
+                 u_bound=1.0, sys=None, verbose=True, time_limit=None,
+                 n_iters=2, trust_region=None):
         self.j = j
         n_x, n_u = 2, 1
         a00, a10, a11, b = sys.a00, sys.a10, sys.a11, sys.b
@@ -454,9 +458,9 @@ class BilinearSCPSubopt:
         self.model = M
 
         x_scp, u_scp = _add_scp_chain(M, j, T, r_cost, x0_lo, x0_hi,
-                                       u_bound, sys, n_iters=n_iters)
+                                       u_bound, sys, n_iters=n_iters,
+                                       trust_region=trust_region)
 
-        # Unconstrained optimal chain (same x_0, free dynamics)
         x_opt = {0: x_scp[0]}
         u_opt = {}
         for t in range(1, j + 1):
@@ -470,8 +474,6 @@ class BilinearSCPSubopt:
                 x_opt[k+1][1] == a11*x_opt[k][1] + a10*x_opt[k][0],
                 name=f"opt_dyn1_{k}")
 
-        # --- Objective: J_scp - J_opt ---
-        # J = sum_{t=0}^{j} ||x_t||^2 + r_cost * sum_{t=0}^{j-1} u_t^2
         obj = gp.QuadExpr()
         for t in range(j + 1):
             for i in range(n_x):

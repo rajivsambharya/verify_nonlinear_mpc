@@ -1,16 +1,17 @@
 j_vals: [2, 3, 4, 5, 6, 7, 8, 10]
-T_vals: [5]
-r_cost: 0 #1e-3
+T_vals: [3]
+r_cost: 0 
 feas_tol: 1.0e-6
 time_limit: 300
-x0_mins: [2]
-x0_maxes: [3]
+x0_mins: [2, 2]
+x0_maxes: [3, 3]
 n_ilqr_iters: [1, 2]
 # Bilinear system: x+[0] = a00*x[0] + u + b*u*x[0]
 #                  x+[1] = a11*x[1] + a10*x[0]
 
 # from korda and jones
-a00: 0.9
+a00: 1
 a10: 0.85
 a11: 1
-b: 0.2 #0.2
+b: 0 #.2
+b_2: 0.1

@@ -1,27 +1,18 @@
-# j_vals: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-j_vals: [ 3, 4, 5, 6, 7, 8, 10] #, 7, 8]
-T_vals: [5]
-r_cost: 1e-3 #1e-4
+j_vals: [3, 4, 5, 6, 7, 8, 10]
+T_vals: [4]
+r_cost: 0 #1e-3
 feas_tol: 1.0e-4
 time_limit: 300
-x0_mins: [2] #[-1.]
-x0_maxes: [3] #[1.]
-u_bound: 1 #0.5 #1 #0.1
+x0_mins: [2]
+x0_maxes: [3]
+u_bound: 1
+n_scp_iters: [1, 2]
+trust_region_size: 0.5 #1.0
 # Bilinear system: x+[0] = a00*x[0] + u + b*u*x[0]
 #                  x+[1] = a11*x[1] + a10*x[0]
-# a00: 1.1 #0.9
-# a10: 0.8 #1.5
-# a11: 0.7 #0.7
-# b: 0.5 #0.8 #0.2
 
 # from korda and jones
 a00: 0.9
-a10: 0.85 #1.5
-a11: 1 #0.7
-b: 0.2 #0.8 #0.2
-
-# modified from korda and jones
-# a00: 0.95
-# a10: 0.925 #1.5
-# a11: 1 #0.7
-# b: 0.1 #0.8 #0.2
+a10: 0.85
+a11: 1
+b: 0.2

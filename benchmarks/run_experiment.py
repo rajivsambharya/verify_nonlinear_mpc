@@ -12,6 +12,10 @@ import benchmarks.bilinear_recursive_feas as bilinear_recursive_feas
 import benchmarks.bilinear_closed_loop as bilinear_closed_loop
 import benchmarks.bilinear_closed_loop2 as bilinear_closed_loop2
 import benchmarks.bilinear_closed_loop_ilqr as bilinear_closed_loop_ilqr
+import benchmarks.cartpole_scp as cartpole_scp
+import benchmarks.cartpole_regularize as cartpole_regularize
+import benchmarks.nonlinear_double_int_closed_loop as nonlinear_double_int_closed_loop
+import benchmarks.cartpole_closed_loop_ilqr as cartpole_closed_loop_ilqr
 import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.spring_masses as spring_masses
 import benchmarks.cartpole_constrained_stability_scp as cartpole_constrained_stability_scp
@@ -69,6 +73,26 @@ def main_run_bilinear_closed_loop2(cfg):
 @hydra.main(config_path='configs', config_name='bilinear_closed_loop_ilqr.yaml')
 def main_run_bilinear_closed_loop_ilqr(cfg):
     bilinear_closed_loop_ilqr.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_scp.yaml')
+def main_run_cartpole_scp(cfg):
+    cartpole_scp.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_regularize.yaml')
+def main_run_cartpole_regularize(cfg):
+    cartpole_regularize.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='nonlinear_double_int_closed_loop.yaml')
+def main_run_nonlinear_double_int_closed_loop(cfg):
+    nonlinear_double_int_closed_loop.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='cartpole_closed_loop_ilqr.yaml')
+def main_run_cartpole_closed_loop_ilqr(cfg):
+    cartpole_closed_loop_ilqr.run(cfg)
 
 
 @hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
@@ -176,6 +200,22 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'bilinear_closed_loop_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_bilinear_closed_loop_ilqr()
+    elif sys.argv[1] == 'cartpole_scp':
+        sys.argv[1] = base + 'cartpole_scp/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_scp()
+    elif sys.argv[1] == 'cartpole_regularize':
+        sys.argv[1] = base + 'cartpole_regularize/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_regularize()
+    elif sys.argv[1] == 'nonlinear_double_int_closed_loop':
+        sys.argv[1] = base + 'nonlinear_double_int_closed_loop/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_nonlinear_double_int_closed_loop()
+    elif sys.argv[1] == 'cartpole_closed_loop_ilqr':
+        sys.argv[1] = base + 'cartpole_closed_loop_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_cartpole_closed_loop_ilqr()
     elif sys.argv[1] == 'stir_tank_subopt':
         sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
