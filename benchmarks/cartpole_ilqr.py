@@ -253,23 +253,28 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
 
     u_lin_prev = None  # None → u_bar = 0 for first iteration
     u0_all_iters = []  # u_lin[0][0] for each iteration, for post-solve inspection
+    sin_bar_last = None  # sin_bar from last iteration, returned to avoid re-computing sin(x_0)
 
     for it in range(n_iters):
         it_tag = f"{tag}_it{it}"
 
         # ------------------------------------------------------------------
         # 1. Forward pass: x_bar[t+1] = f(x_bar[t], u_bar[t])
+        #    x_bar[0] is set to x_0 directly (no extra variable or init constraint)
         # ------------------------------------------------------------------
-        x_bar = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xbar_{it_tag}_{t}")
-                 for t in range(T + 1)}
+        x_bar = {0: x_0}  # reuse x_0 directly — avoids duplicate sin(x_0) constraints
+        x_bar.update({t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"xbar_{it_tag}_{t}")
+                      for t in range(1, T + 1)})
         sin_bar = {t: M.addVar(lb=-1, ub=1,      name=f"sinbar_{it_tag}_{t}") for t in range(T)}
         cos_bar = {t: M.addVar(lb=-1, ub=1,      name=f"cosbar_{it_tag}_{t}") for t in range(T)}
-        for i in range(n_x):
-            M.addConstr(x_bar[0][i] == x_0[i], name=f"fp_init_{it_tag}_{i}")
 
-        for t in range(T):
+        for t in range(1):
             M.addGenConstrSin(x_bar[t][0], sin_bar[t], name=f"fp_sin_{it_tag}_{t}")
-            M.addGenConstrCos(x_bar[t][0], cos_bar[t], name=f"fp_cos_{it_tag}_{t}")
+            M.addConstr(cos_bar[t] * cos_bar[t] + sin_bar[t] * sin_bar[t] == 1, name=f"fp_sincos_{it_tag}_{t}")
+
+        # for t in range(1):
+        #     M.addGenConstrSin(x_bar[t][0], sin_bar[t], name=f"fp_sin_{it_tag}_{t}")
+        #     M.addGenConstrCos(x_bar[t][0], cos_bar[t], name=f"fp_cos_{it_tag}_{t}")
             # M.addConstr(x_bar[t+1][0] == x_bar[t][0] + dt * x_bar[t][1],
             #             name=f"fp_dyn0_{it_tag}_{t}")
             # if it == 0:
@@ -352,8 +357,9 @@ def _add_ilqr_iters(M, tag, x_0, n_iters, T, r, dt, mass, length, g, u_max, nu=0
         u0_all_iters.append(u_lin[0][0])
         u_lin_prev = u_lin
         x_lin_prev = x_lin
+        sin_bar_last = sin_bar
 
-    return u_lin_prev, x_lin_prev, u0_all_iters
+    return u_lin_prev, x_lin_prev, u0_all_iters, sin_bar_last
 
 
 class CartpoleILQRPolicyVerify:
@@ -390,22 +396,21 @@ class CartpoleILQRPolicyVerify:
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
 
         # iLQR at x[0]: n_iters iterations; u0_ilqr applied, x0_lqr used for V_curr
-        u0_ilqr, x0_lqr, u0_iters = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
+        u0_ilqr, x0_lqr, u0_iters, sin_bar_x0 = _add_ilqr_iters(M, "ilqr0", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Applied control = first step of last LQR solution at x[0]
         u0 = M.addVars(n_u, lb=-u_max, ub=u_max, name="u0")
         M.addConstr(u0[0] == u0_ilqr[0][0], name="apply_u")
 
         # True nonlinear dynamics: x[1] = f(x[0], u0)
-        sin0 = M.addVar(lb=-1, ub=1,      name="sin0")
+        # sin_bar_x0[0] = sin(x0[0]) already computed in the iLQR forward pass — no duplicate needed
         tdd0 = M.addVar(lb=-GRB.INFINITY, name="tdd0")
-        M.addGenConstrSin(x0[0], sin0, name="sin_dyn")
-        M.addConstr(x1[0] == x0[0] + dt * x0[1],                          name="dyn_theta")
-        M.addConstr(tdd0 == g/length * sin0 + u0[0] / (mass * length**2), name="tdd_dyn")
-        M.addConstr(x1[1] == x0[1] + dt * tdd0,                           name="dyn_thetadot")
+        M.addConstr(x1[0] == x0[0] + dt * x0[1],                                    name="dyn_theta")
+        M.addConstr(tdd0 == g/length * sin_bar_x0[0] + u0[0] / (mass * length**2), name="tdd_dyn")
+        M.addConstr(x1[1] == x0[1] + dt * tdd0,                                     name="dyn_thetadot")
 
         # iLQR at x[1]: n_iters iterations; x1_lqr used for V_next
-        u1_ilqr, x1_lqr, _ = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
+        u1_ilqr, x1_lqr, _, _ = _add_ilqr_iters(M, "ilqr1", x1, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         # Lyapunov values = cost of final LQR solution trajectory
         V_curr = (
@@ -476,7 +481,7 @@ class CartpoleILQRPolicyPhase1:
 
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
 
-        u_ilqr, x_lqr, _ = _add_ilqr_iters(
+        u_ilqr, x_lqr, _, _ = _add_ilqr_iters(
             M, "ilqr", x0, n_iters, T, r, dt, mass, length, g, u_max, nu=nu)
 
         V_curr = (
