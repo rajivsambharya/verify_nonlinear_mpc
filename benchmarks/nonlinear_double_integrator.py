@@ -24,6 +24,8 @@ def run(cfg):
     x_hi = cfg.x_maxes
     r = getattr(cfg, 'r', 0.0)
     u_max = getattr(cfg, 'u_max', 10.0)
+    alpha = getattr(cfg, 'alpha', 0.1)
+    obj_tol = getattr(cfg, 'obj_tol', 1e-4)
 
     # T_vals = list(range(5, T_max + 1))
     T_vals = cfg.T_vals
@@ -32,7 +34,8 @@ def run(cfg):
 
     for T in T_vals:
         ver = NonlinearDoubleIntegratorVerify(
-            T=T, r=r, x_lo=x_lo, x_hi=x_hi, u_max=u_max, verbose=True
+            T=T, r=r, x_lo=x_lo, x_hi=x_hi, u_max=u_max, alpha=alpha,
+            obj_tol=obj_tol, verbose=True
         )
 
         status, elapsed = ver.solve()
@@ -46,7 +49,7 @@ def run(cfg):
     ax.plot(T_vals, obj_vals, marker=markers[0], linewidth=2, color=colors[0])
     ax.set_xlabel('horizon $T$')
     # ax.set_yscale('log')
-    ax.set_ylabel('worst-case suboptimality')
+    ax.set_ylabel('worst-case subopt.')
     ax.grid(True)
     fig.tight_layout()
     fig.savefig('nonlinear_di_suboptimality.pdf', bbox_inches='tight')
@@ -82,10 +85,12 @@ class NonlinearDoubleIntegratorVerify:
     Objective: maximize ||x_kkt[T]||^2 - ||x_opt[T]||^2
     """
 
-    def __init__(self, T=5, r=0.1, x_lo=-4.0, x_hi=4.0, u_max=10.0, verbose=True):
+    def __init__(self, T=5, r=0.1, x_lo=-4.0, x_hi=4.0, u_max=10.0, alpha=0.1,
+                 obj_tol=1e-4, verbose=True):
         n_x = 2
         n_u = 1
-        alpha = 0.1 #0.02 #5   # nonlinear gain: f(x) = alpha * ||x||^2 * ones(2)
+        # alpha: nonlinear gain: f(x) = alpha * ||x||^2 * ones(2)
+        self.obj_tol = obj_tol
 
         # Dynamics
         A = np.array([[1.0, 1.0],
@@ -100,7 +105,7 @@ class NonlinearDoubleIntegratorVerify:
         # --- Gurobi model ---
         M = gp.Model("nonlinear_di_verify")
         M.Params.OutputFlag = 1 if verbose else 0
-        # M.Params.FeasibilityTol = 1e-9
+        M.Params.FeasibilityTol = 5e-9
         # M.Params.OptimalityTol = 1e-9
         # M.Params.MIPGap = 1e-9
         # M.Params.NumericFocus = 3
@@ -272,11 +277,12 @@ class NonlinearDoubleIntegratorVerify:
         def _callback(model, where):
             if where == GRB.Callback.MIP:
                 obj_bnd = model.cbGet(GRB.Callback.MIP_OBJBND)
-                if obj_bnd < 1e-4:
+                if obj_bnd < self.obj_tol:
                     model.terminate()
 
         self.model.setObjective(self.orig_objective, GRB.MAXIMIZE)
-        self.model.optimize(_callback)
+        # self.model.optimize(_callback)
+        self.model.optimize()
         return self.model.Status, self.model.Runtime
 
     def solution_dict(self):
@@ -287,7 +293,7 @@ class NonlinearDoubleIntegratorVerify:
             return {"obj": None}
 
         return {
-            "obj": self.model.ObjVal,
+            "obj": self.model.ObjBound,
             "x0": {i: self.x0[i].X for i in range(self.n_x)},
             "x_kkt": {t: v2dict(self.x_kkt_traj[t]) for t in range(self.T + 1)},
             "u_kkt": {t: v2dict(self.u_kkt_traj[t]) for t in range(self.T)},

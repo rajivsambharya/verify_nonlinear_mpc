@@ -112,6 +112,7 @@ def run(cfg):
     ax_sub.set_xlabel('step $K$')
     ax_sub.set_yscale('log')
     ax_sub.set_ylabel('worst-case\nclosed-loop subopt.')
+    ax_sub.set_xticks([j for j in j_axis if j % 2 == 0])
     ax_sub.grid(True)
     fig_sub.tight_layout()
     fig_sub.savefig('bilinear_closed_loop_subopt.pdf', bbox_inches='tight')
@@ -120,6 +121,7 @@ def run(cfg):
     ax_time.set_xlabel('step $K$')
     ax_time.set_yscale('log')
     ax_time.set_ylabel('solve time (seconds)')
+    ax_time.set_xticks([j for j in j_axis if j % 2 == 0])
     ax_time.grid(True)
     fig_time.tight_layout()
     fig_time.savefig('bilinear_closed_loop_time.pdf', bbox_inches='tight')
@@ -372,11 +374,7 @@ class BilinearMaxStateNorm:
                 obj += xc[jj][ii] * xc[jj][ii] - x_opt[jj][ii] * x_opt[jj][ii]
         for jj in range(j):
             obj += r_cost * (uc[jj][0] * uc[jj][0] - u_opt[jj][0] * u_opt[jj][0])
-        # for jj in range(j + 1):
-        #     for ii in range(n_x):
-        #         obj += xc[jj][ii] * xc[jj][ii]
-        # for jj in range(j):
-        #     obj += r_cost * (uc[jj][0] * uc[jj][0])
+
         M.Params.MIPGapAbs = 0.0001
         M.setObjective(obj, GRB.MAXIMIZE)
         self._subs.append((M, xc, uc, x_opt, u_opt))

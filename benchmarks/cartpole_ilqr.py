@@ -147,36 +147,31 @@ def run(cfg):
                 opt_vals[ti, ii] = np.inf
             times[ti, ii] = total_time
 
-    markers = ['o', 's', '^', 'D', 'v', 'p', 'h', '*']
+    lin_rhos  = opt_vals[:, 0]
+    lin_times = times[:, 0]
 
     fig_rate, ax_rate = plt.subplots(figsize=(8, 5))
-    for ti in range(n_T):
-        color = colors[ti]
-        ax_rate.plot(n_ilqr_iters_list, opt_vals[ti],
-                     marker=markers[ti % len(markers)], linewidth=2, color=color,
-                     label=f'iLQR T={T_vals_list[ti]}')
-        ax_rate.axhline(kkt_rhos[ti], color=color, linewidth=1.5, linestyle='--',
-                        label=f'KKT T={T_vals_list[ti]}')
-    ax_rate.set_xlabel('iLQR iterations')
+    ax_rate.plot(T_vals_list, kkt_rhos,
+                 marker='o', linewidth=2, color=colors[0], label='KKT MPC')
+    ax_rate.plot(T_vals_list, lin_rhos,
+                 marker='s', linewidth=2, color=colors[1], label='Linearized MPC')
+    ax_rate.set_xlabel('horizon $T$')
     ax_rate.set_ylabel('rate $\\rho$')
-    ax_rate.legend()
+    # ax_rate.legend()
     ax_rate.grid(True)
     fig_rate.tight_layout()
     fig_rate.savefig('rates_ilqr.pdf', bbox_inches='tight')
     plt.close(fig_rate)
 
     fig_time, ax_time = plt.subplots(figsize=(8, 5))
-    for ti in range(n_T):
-        color = colors[ti]
-        ax_time.plot(n_ilqr_iters_list, times[ti],
-                     marker=markers[ti % len(markers)], linewidth=2, color=color,
-                     label=f'iLQR T={T_vals_list[ti]}')
-        ax_time.axhline(kkt_times[ti], color=color, linewidth=1.5, linestyle='--',
-                        label=f'KKT T={T_vals_list[ti]}')
-    ax_time.set_xlabel('iLQR iterations')
+    ax_time.plot(T_vals_list, kkt_times,
+                 marker='o', linewidth=2, color=colors[0], label='KKT MPC')
+    ax_time.plot(T_vals_list, lin_times,
+                 marker='s', linewidth=2, color=colors[1], label='Linearized MPC')
+    ax_time.set_xlabel('horizon $T$')
     ax_time.set_ylabel('total solve time (sec)')
     ax_time.set_yscale('log')
-    ax_time.legend()
+    # ax_time.legend()
     ax_time.grid(True)
     fig_time.tight_layout()
     fig_time.savefig('times_ilqr.pdf', bbox_inches='tight')
@@ -380,11 +375,11 @@ class CartpoleILQRPolicyVerify:
                  rho=0.2, x_lo=0.0, x_hi=4.0, verbose=True,
                  time_limit=None, n_iters=1, nu=0.0, V_0_max=None):
         n_x, n_u = 2, 1
-        u_max = 1000
+        u_max = 1000 #GRB.INFINITY  # no control saturation in verification
 
         M = gp.Model("cartpole_ilqr_policy_verify")
         M.Params.OutputFlag = 1 if verbose else 0
-        M.Params.FeasibilityTol = 1e-9
+        M.Params.FeasibilityTol = 1e-9 #1e-9
         M.Params.NonConvex = 2
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
@@ -392,6 +387,9 @@ class CartpoleILQRPolicyVerify:
 
         # Initial state (x[0] in X_0)
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
+        # x0 = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="x0")
+        M.addConstr(x0[0] >= 0, name="x0_lo")
+
         # Next state x[1] (free: no state constraints)
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
 
@@ -428,9 +426,9 @@ class CartpoleILQRPolicyVerify:
 
         # Feasibility = policy does NOT satisfy contraction with rate rho
         eps = 1 - rho
-        # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
-        M.addConstr(V_curr >= 1e-3, name="stability")
-        M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
+        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
+        # M.addConstr(V_curr >= 1e-3, name="stability")
+        # M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
         M.setObjective(0, GRB.MAXIMIZE)
 
         self.V_curr   = V_curr
@@ -469,7 +467,7 @@ class CartpoleILQRPolicyPhase1:
                  x_lo=0.0, x_hi=4.0, verbose=True, time_limit=None,
                  n_iters=1, nu=0.0):
         n_x = 2
-        u_max = 1000
+        u_max = 1000 #GRB.INFINITY
 
         M = gp.Model("cartpole_ilqr_policy_phase1")
         M.Params.OutputFlag = 1 if verbose else 0
@@ -662,6 +660,7 @@ class CartpoleILQRVerify:
                 self.x[k] = M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_{k}")
             else:
                 self.x[k] = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"x_{k}")
+        M.addConstr(self.x[0][0] >= 0, name="x0_lo")
 
         # Create variables and constraints for K timesteps
         for k in range(K):
