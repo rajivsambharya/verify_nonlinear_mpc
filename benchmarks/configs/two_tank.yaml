@@ -1,9 +1,10 @@
 T_vals: [1, 2, 3, 4, 5, 8, 10]
-u_range_vals: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]  # min(US) ~= 35.33, keep below that
+u_range_vals: [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
+# u_range_vals: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0]  # anchored at U_ANCHOR=0.5*US; crossover ~between 0 and 2
 r_vals: [0.0] #, 0.1, 1.0]
 dt: 1 #1.0
 feas_tol: 1.0e-4
 time_limit: 1000
-dual_bound: 1 #50.0  # initial (pre-tightening) box on the Farkas dual variables y_ic, y
+dual_bound: .1 #50.0  # initial (pre-tightening) box on the Farkas dual variables y_ic, y
 bound_tighten_time: 1.0  # per-variable OBBT time budget (seconds); null/0 disables OBBT
 x0_nominal: null  # null -> use the center of the box constraints

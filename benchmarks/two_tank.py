@@ -53,15 +53,27 @@ US = np.array([
     (A_OUT[0] * _S1 - A_OUT[1] * _S2) / GAMMA1,
     (A_OUT[1] * _S2) / (1 - GAMMA2),
 ])
-# US ~= [43.55, 35.33]. min(US) = 35.33 caps how far u_range can be swept
-# while still respecting u_range <= US (pumps can't deliver negative flow).
+# US ~= [43.55, 35.33].
+#
+# The equilibrium flow US is *not* a good anchor for a u_range sweep: this
+# system is open-loop self-stabilizing at u=US (outflow ~ sqrt(level) is
+# concave, so a fixed equilibrium-sized inflow already pulls any level in
+# the box back toward xs -- verified directly: Mmat's diagonal, which is
+# also its eigenvalues since Mmat is upper-triangular, stays in (0,1)
+# across the whole box). So a control window *centered at US* is feasible
+# even at zero width, and only gets easier as it widens -- there is no
+# infeasible regime to sweep out of.
+#
+# To get a genuine small-window-infeasible / large-window-feasible
+# crossover, anchor the sweep at a deliberately *under-powered* baseline
+# flow instead, U_ANCHOR = 0.5*US: held there with no deviation, the
+# tanks can't sustain the setpoint and drift out of the box; the window
+# has to widen enough to let u climb back up (not all the way to US
+# itself -- somewhere in between suffices) before it's feasible again.
+U_ANCHOR = 0.5 * US
 
 # Box constraints on the states: a symmetric +/- Z_DIFF tolerance around
-# the setpoint. Z_DIFF=10 is tuned (see two_tank.yaml's u_range_vals
-# sweep) so that at u_range=0 there is a Farkas counterexample (some
-# corner of the box can't be held in-box under one/several steps with u
-# pinned exactly at US), while at u_range=30 (< min(US)) the certificate
-# is feasible: the crossover happens somewhere in between.
+# the setpoint.
 Z_DIFF = 10.0
 ZMIN = np.array([-Z_DIFF, -Z_DIFF])
 ZMAX = np.array([Z_DIFF, Z_DIFF])
@@ -80,13 +92,14 @@ B_MAT = np.array([
 
 
 def _u_box(u_range):
-    """Symmetric control range around the equilibrium, clipped at 0 (pumps
+    """Symmetric control window around the under-powered anchor U_ANCHOR
+    (not the equilibrium US -- see the comment above), clipped at 0 (pumps
     cannot deliver negative flow)."""
     u_range = np.asarray(u_range, dtype=float)
     if u_range.ndim == 0:
         u_range = np.full(2, float(u_range))
-    u_lo = np.maximum(0.0, US - u_range)
-    u_hi = US + u_range
+    u_lo = np.maximum(0.0, U_ANCHOR - u_range)
+    u_hi = U_ANCHOR + u_range
     return u_lo, u_hi
 
 
