@@ -20,6 +20,7 @@ import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.spring_masses as spring_masses
 import benchmarks.cartpole_constrained_stability_scp as cartpole_constrained_stability_scp
 import benchmarks.four_tank as four_tank
+import benchmarks.two_tank as two_tank
 
 
 import matplotlib
@@ -114,6 +115,11 @@ def main_run_cartpole_constrained_stability_scp(cfg):
 @hydra.main(config_path='configs', config_name='four_tank.yaml')
 def main_run_four_tank(cfg):
     four_tank.run(cfg)
+
+
+@hydra.main(config_path='configs', config_name='two_tank.yaml')
+def main_run_two_tank(cfg):
+    two_tank.run(cfg)
 
 
 # @hydra.main(config_path='configs', config_name='power_converter.yaml')
@@ -238,6 +244,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'four_tank/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_four_tank()
+    elif sys.argv[1] == 'two_tank':
+        sys.argv[1] = base + 'two_tank/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+        sys.argv = [sys.argv[0], sys.argv[1]]
+        main_run_two_tank()
     elif sys.argv[1] == 'sparse_coding':
         sys.argv[1] = base + 'sparse_coding/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
