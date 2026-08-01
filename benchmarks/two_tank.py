@@ -344,17 +344,16 @@ class TwoTankFarkas:
                 for i in range(n_x)]
 
         db = dual_bound
-        # db = GRB.INFINITY
         y_ic  = {i: M.addVar(lb=-db, ub=db, name=f"yic_{i}") for i in range(n_x)}
         y     = {t: {i: M.addVar(lb=-db, ub=db, name=f"y_{t}_{i}") for i in range(n_x)}
                  for t in range(T)}
-        s_up  = {t: {i: M.addVar(lb=0.0, name=f"sup_{t}_{i}") for i in range(n_x)}
+        s_up  = {t: {i: M.addVar(lb=0.0, ub=db, name=f"sup_{t}_{i}") for i in range(n_x)}
                  for t in range(T + 1)}
-        s_lo  = {t: {i: M.addVar(lb=0.0, name=f"slo_{t}_{i}") for i in range(n_x)}
+        s_lo  = {t: {i: M.addVar(lb=0.0, ub=db, name=f"slo_{t}_{i}") for i in range(n_x)}
                  for t in range(T + 1)}
-        su_up = {t: {k: M.addVar(lb=0.0, name=f"suup_{t}_{k}") for k in range(n_u)}
+        su_up = {t: {k: M.addVar(lb=0.0, ub=db, name=f"suup_{t}_{k}") for k in range(n_u)}
                  for t in range(T)}
-        su_lo = {t: {k: M.addVar(lb=0.0, name=f"sulo_{t}_{k}") for k in range(n_u)}
+        su_lo = {t: {k: M.addVar(lb=0.0, ub=db, name=f"sulo_{t}_{k}") for k in range(n_u)}
                  for t in range(T)}
 
         for i in range(n_x):
