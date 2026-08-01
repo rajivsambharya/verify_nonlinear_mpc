@@ -42,13 +42,13 @@ XS = np.array([14.0, 14.0, 14.2, 21.3])            # cm, setpoint
 US = np.array([43.4, 35.4])                        # ml/s, setpoint input
 
 # Box constraints (9), in deviation coordinates z = x - xs, v = u - us
-ZMIN = 0 *np.array([-6.5, -6.5, -10.7, -16.8])
-ZMAX = 0 * np.array([14.0, 14.0, 13.8, 6.7])
-# ZMIN = np.array([-6.5, -6.5, -10.7, -16.8])
-# ZMAX = np.array([14.0, 14.0, 13.8, 6.7])
+# ZMIN = 0 *np.array([-6.5, -6.5, -10.7, -16.8])
+# ZMAX = 0 * np.array([14.0, 14.0, 13.8, 6.7])
+ZMIN = np.array([-6.5, -6.5, -10.7, -16.8])
+ZMAX = np.array([14.0, 14.0, 13.8, 6.7])
 # VMIN = np.array([-43.4, -35.4])
 # VMAX = np.array([16.6, 24.6])
-BB = 600
+BB = 2
 VMIN = np.array([-BB, -BB])
 VMAX = np.array([BB, BB])
 
@@ -170,22 +170,40 @@ def run(cfg):
 # directly).
 # ---------------------------------------------------------------------------
 
+# def _add_sqrt_linearization(M, tag, x_lo, x_hi):
+#     n = len(x_lo)
+#     # s_bnd_lo = np.sqrt(2 * G * np.asarray(x_lo, dtype=float))
+#     # s_bnd_hi = np.sqrt(2 * G * np.asarray(x_hi, dtype=float))
+#     s_bnd_lo = 0 #-GRB.INFINITY #np.sqrt(2 * G * np.asarray(x_lo, dtype=float))
+#     s_bnd_hi = GRB.INFINITY #np.sqrt(2 * G * np.asarray(x_hi, dtype=float))
+#     # c_bnd_lo = G / s_bnd_hi
+#     # c_bnd_hi = G / s_bnd_lo
+#     c_bnd_lo = 0 #-GRB.INFINITY
+#     c_bnd_hi = GRB.INFINITY
+
+#     xbar = {i: M.addVar(lb=x_lo[i], ub=x_hi[i], name=f"xbar_{tag}_{i}") for i in range(n)}
+#     # s    = {i: M.addVar(lb=s_bnd_lo[i], ub=s_bnd_hi[i], name=f"s_{tag}_{i}") for i in range(n)}
+#     # c    = {i: M.addVar(lb=c_bnd_lo[i], ub=c_bnd_hi[i], name=f"c_{tag}_{i}") for i in range(n)}
+#     s    = {i: M.addVar(lb=s_bnd_lo, ub=s_bnd_hi, name=f"s_{tag}_{i}") for i in range(n)}
+#     c    = {i: M.addVar(lb=c_bnd_lo, ub=c_bnd_hi, name=f"c_{tag}_{i}") for i in range(n)}
+#     for i in range(n):
+#         M.addConstr(s[i] * s[i] == 2 * G * xbar[i], name=f"sqrtdef_{tag}_{i}")
+#         M.addConstr(c[i] * s[i] == G, name=f"slopedef_{tag}_{i}")
+#     return xbar, s, c
+
 def _add_sqrt_linearization(M, tag, x_lo, x_hi):
     n = len(x_lo)
-    # s_bnd_lo = np.sqrt(2 * G * np.asarray(x_lo, dtype=float))
-    # s_bnd_hi = np.sqrt(2 * G * np.asarray(x_hi, dtype=float))
-    s_bnd_lo = 0 #-GRB.INFINITY #np.sqrt(2 * G * np.asarray(x_lo, dtype=float))
-    s_bnd_hi = GRB.INFINITY #np.sqrt(2 * G * np.asarray(x_hi, dtype=float))
-    # c_bnd_lo = G / s_bnd_hi
-    # c_bnd_hi = G / s_bnd_lo
-    c_bnd_lo = -GRB.INFINITY
-    c_bnd_hi = GRB.INFINITY
+    s_bnd_lo = np.sqrt(2 * G * np.asarray(x_lo, dtype=float))
+    s_bnd_hi = np.sqrt(2 * G * np.asarray(x_hi, dtype=float))
+    c_bnd_lo = G / s_bnd_hi
+    c_bnd_hi = G / s_bnd_lo
+
 
     xbar = {i: M.addVar(lb=x_lo[i], ub=x_hi[i], name=f"xbar_{tag}_{i}") for i in range(n)}
-    # s    = {i: M.addVar(lb=s_bnd_lo[i], ub=s_bnd_hi[i], name=f"s_{tag}_{i}") for i in range(n)}
-    # c    = {i: M.addVar(lb=c_bnd_lo[i], ub=c_bnd_hi[i], name=f"c_{tag}_{i}") for i in range(n)}
-    s    = {i: M.addVar(lb=s_bnd_lo, ub=s_bnd_hi, name=f"s_{tag}_{i}") for i in range(n)}
-    c    = {i: M.addVar(lb=c_bnd_lo, ub=c_bnd_hi, name=f"c_{tag}_{i}") for i in range(n)}
+    s    = {i: M.addVar(lb=s_bnd_lo[i], ub=s_bnd_hi[i], name=f"s_{tag}_{i}") for i in range(n)}
+    c    = {i: M.addVar(lb=c_bnd_lo[i], ub=c_bnd_hi[i], name=f"c_{tag}_{i}") for i in range(n)}
+    # s    = {i: M.addVar(lb=s_bnd_lo, ub=s_bnd_hi, name=f"s_{tag}_{i}") for i in range(n)}
+    # c    = {i: M.addVar(lb=c_bnd_lo, ub=c_bnd_hi, name=f"c_{tag}_{i}") for i in range(n)}
     for i in range(n):
         M.addConstr(s[i] * s[i] == 2 * G * xbar[i], name=f"sqrtdef_{tag}_{i}")
         M.addConstr(c[i] * s[i] == G, name=f"slopedef_{tag}_{i}")
@@ -195,7 +213,17 @@ def _add_sqrt_linearization(M, tag, x_lo, x_hi):
 def _build_Alin_bbar(c, s):
     """
     Linearized continuous-time dynamics x' ~= Alin(c) x + B u + bbar(s),
-    where Alin, bbar are built from the sqrt-linearization variables.
+    valid for *absolute* u (not deviation v = u - us).
+
+    Correct first-order Taylor expansion about (xbar, ubar=US):
+        f(x,u) ~= f(xbar,ubar) + Alin(x-xbar) + B(u-ubar)
+                = [f(xbar,ubar) - Alin@xbar - B@ubar] + Alin@x + B@u
+    The B@ubar term must be *subtracted* out of the constant here,
+    because B@u (with absolute u) already reproduces it once u=ubar.
+    Using c@xbar == s/2 (since xbar_i = s_i^2/(2g)) collapses
+    f(xbar,ubar) - Alin@xbar down to -a/(2A)*s, and the +B@ubar term
+    introduced by f(xbar,ubar) exactly cancels the -B@ubar above -- so
+    bbar ends up depending only on s, with no US term at all.
     """
     Alin = [[0.0] * 4 for _ in range(4)]
     Alin[0][0] = -A_OUT[0] / A_AREA[0] * c[0]
@@ -206,12 +234,10 @@ def _build_Alin_bbar(c, s):
     Alin[3][3] = -A_OUT[3] / A_AREA[3] * c[3]
 
     bbar = [0.0] * 4
-    bbar[0] = -A_OUT[0] / (2 * A_AREA[0]) * s[0] + A_OUT[2] / (2 * A_AREA[0]) * s[2] \
-        + GAMMA[0] / A_AREA[0] * US[0]
-    bbar[1] = -A_OUT[1] / (2 * A_AREA[1]) * s[1] + A_OUT[3] / (2 * A_AREA[1]) * s[3] \
-        + GAMMA[1] / A_AREA[1] * US[1]
-    bbar[2] = -A_OUT[2] / (2 * A_AREA[2]) * s[2] + (1 - GAMMA[1]) / A_AREA[2] * US[1]
-    bbar[3] = -A_OUT[3] / (2 * A_AREA[3]) * s[3] + (1 - GAMMA[0]) / A_AREA[3] * US[0]
+    bbar[0] = -A_OUT[0] / (2 * A_AREA[0]) * s[0] + A_OUT[2] / (2 * A_AREA[0]) * s[2]
+    bbar[1] = -A_OUT[1] / (2 * A_AREA[1]) * s[1] + A_OUT[3] / (2 * A_AREA[1]) * s[3]
+    bbar[2] = -A_OUT[2] / (2 * A_AREA[2]) * s[2]
+    bbar[3] = -A_OUT[3] / (2 * A_AREA[3]) * s[3]
     return Alin, bbar
 
 
@@ -294,18 +320,17 @@ class FourTankFarkas:
         # branch-and-bound build tight McCormick relaxations for the
         # bilinear stationarity/objective terms -- unbounded duals were
         # observed to stall convergence.
-        # db = dual_bound
-        db = GRB.INFINITY
+        db = dual_bound
         y_ic  = {i: M.addVar(lb=-db, ub=db, name=f"yic_{i}") for i in range(n_x)}
         y     = {t: {i: M.addVar(lb=-db, ub=db, name=f"y_{t}_{i}") for i in range(n_x)}
                  for t in range(T)}
-        s_up  = {t: {i: M.addVar(lb=0.0, name=f"sup_{t}_{i}") for i in range(n_x)}
+        s_up  = {t: {i: M.addVar(lb=0.0, ub=db, name=f"sup_{t}_{i}") for i in range(n_x)}
                  for t in range(T + 1)}
-        s_lo  = {t: {i: M.addVar(lb=0.0, name=f"slo_{t}_{i}") for i in range(n_x)}
+        s_lo  = {t: {i: M.addVar(lb=0.0, ub=db, name=f"slo_{t}_{i}") for i in range(n_x)}
                  for t in range(T + 1)}
-        su_up = {t: {k: M.addVar(lb=0.0, name=f"suup_{t}_{k}") for k in range(n_u)}
+        su_up = {t: {k: M.addVar(lb=0.0, ub=db, name=f"suup_{t}_{k}") for k in range(n_u)}
                  for t in range(T)}
-        su_lo = {t: {k: M.addVar(lb=0.0, name=f"sulo_{t}_{k}") for k in range(n_u)}
+        su_lo = {t: {k: M.addVar(lb=0.0, ub=db, name=f"sulo_{t}_{k}") for k in range(n_u)}
                  for t in range(T)}
 
         # Stationarity w.r.t. x_0 (appears in the IC eq. and in the t=0 dynamics eq.)

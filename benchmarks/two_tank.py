@@ -112,6 +112,7 @@ def run(cfg):
     # u_range -> certified feasible.
     # -----------------------------------------------------------------
     farkas_obj = np.zeros((len(u_range_vals), len(T_vals)))
+    linerr_checked = set()   # linearization-error check is T-independent; run once per u_range
     for ri, u_range in enumerate(u_range_vals):
         u_lo, u_hi = _u_box(u_range)
         for ti, T in enumerate(T_vals):
@@ -135,6 +136,28 @@ def run(cfg):
                 print(f"  Mmat at counterexample:\n{Mmat_ce}")
                 print(f"  bbar at counterexample: {bbar_ce}")
             farkas_obj[ri, ti] = obj if obj is not None else float('nan')
+
+            # ---------------------------------------------------------
+            # The linearized certificate above says nothing about the
+            # *true* nonlinear successor -- verify separately that
+            # trusting the linearized model's u_0 choice can't itself
+            # push x_1 = f_true(x_0, u_0) out of the box.
+            # ---------------------------------------------------------
+            if certified and u_range not in linerr_checked:
+                linerr_checked.add(u_range)
+                chk = TwoTankLinearizationErrorCheck(
+                    u_lo=u_lo, u_hi=u_hi, dt=dt, verbose=False, time_limit=time_limit)
+                lin_sol = chk.solution_dict()
+                robust = chk.is_robust()
+                print(f"  [linearization-error check] u_range={u_range}:")
+                for i in range(2):
+                    b = lin_sol[i]
+                    print(f"    x1_true[{i}] range = [{b['min']}, {b['max']}]  "
+                          f"vs box [{X_LO[i]}, {X_HI[i]}]")
+                verdict = {True: 'ROBUST (true dynamics stay in box)',
+                           False: 'NOT ROBUST -- linearization error can leave the box',
+                           None: 'INCONCLUSIVE (a sub-solve did not return a bound)'}[robust]
+                print(f"    -> {verdict}")
 
     # -----------------------------------------------------------------
     # Nominal MPC cost: a plain convex QP (linearized once at a *fixed*
@@ -220,16 +243,28 @@ def _add_sqrt_linearization(M, tag, x_lo, x_hi):
 
 
 def _build_Alin_bbar(c, s):
-    """Linearized continuous-time dynamics x' ~= Alin(c) x + B u + bbar(s)."""
+    """
+    Linearized continuous-time dynamics x' ~= Alin(c) x + B u + bbar(s),
+    valid for *absolute* u (not deviation v = u - us).
+
+    Correct first-order Taylor expansion about (xbar, ubar=US):
+        f(x,u) ~= f(xbar,ubar) + Alin(x-xbar) + B(u-ubar)
+                = [f(xbar,ubar) - Alin@xbar - B@ubar] + Alin@x + B@u
+    The B@ubar term must be *subtracted* out of the constant here,
+    because B@u (with absolute u) already reproduces it once u=ubar.
+    Using c@xbar == s/2 (since xbar_i = s_i^2/(2g)) collapses
+    f(xbar,ubar) - Alin@xbar down to -a/(2A)*s, and the +B@ubar term
+    introduced by f(xbar,ubar) exactly cancels the -B@ubar above -- so
+    bbar ends up depending only on s, with no US term at all.
+    """
     Alin = [[0.0, 0.0], [0.0, 0.0]]
     Alin[0][0] = -A_OUT[0] / A_AREA[0] * c[0]
     Alin[0][1] =  A_OUT[1] / A_AREA[0] * c[1]
     Alin[1][1] = -A_OUT[1] / A_AREA[1] * c[1]
 
     bbar = [0.0, 0.0]
-    bbar[0] = -A_OUT[0] / (2 * A_AREA[0]) * s[0] + A_OUT[1] / (2 * A_AREA[0]) * s[1] \
-        + GAMMA1 / A_AREA[0] * US[0]
-    bbar[1] = -A_OUT[1] / (2 * A_AREA[1]) * s[1] + (1 - GAMMA2) / A_AREA[1] * US[1]
+    bbar[0] = -A_OUT[0] / (2 * A_AREA[0]) * s[0] + A_OUT[1] / (2 * A_AREA[0]) * s[1]
+    bbar[1] = -A_OUT[1] / (2 * A_AREA[1]) * s[1]
     return Alin, bbar
 
 
@@ -430,6 +465,94 @@ class TwoTankFarkas:
             "farkas_obj": self.model.ObjVal,
             "xbar": {i: self.xbar[i].X for i in range(2)},
         }
+
+
+# ---------------------------------------------------------------------------
+# Linearization-error check
+#
+# TwoTankFarkas only proves that the *linearized* one-step model has a
+# feasible u_0 for every x_0 in the box -- it says nothing about the
+# *true* nonlinear successor. This checks, over every x_0 in the box and
+# every u_0 the linearized model would accept (u_0 in the control box AND
+# the linearized prediction x_1_lin stays in the box), whether the true
+# successor x_1_true = f_true(x_0, u_0) can still leave the box. This is
+# a single-step check (T-independent): for each state component i,
+# maximize and minimize (x_1_true)_i over that same feasible set. If both
+# extremes stay inside [x_lo, x_hi] for every i, trusting the linearized
+# model's u_0 choice is safe up to the box; if either extreme escapes,
+# the linearization error alone is enough to violate the box regardless
+# of what the T-horizon certificate said.
+# ---------------------------------------------------------------------------
+
+class TwoTankLinearizationErrorCheck:
+    def __init__(self, x_lo=X_LO, x_hi=X_HI, u_lo=None, u_hi=None, dt=1.0,
+                 verbose=False, time_limit=None):
+        n_x, n_u = 2, 2
+        if u_lo is None or u_hi is None:
+            u_lo, u_hi = _u_box(0.0)
+        self.x_lo, self.x_hi = x_lo, x_hi
+        self.models = {}
+
+        for i in range(n_x):
+            for sense_name, sense in [('max', GRB.MAXIMIZE), ('min', GRB.MINIMIZE)]:
+                M = gp.Model(f"two_tank_linerr_{i}_{sense_name}")
+                M.Params.OutputFlag = 1 if verbose else 0
+                if time_limit is not None:
+                    M.Params.TimeLimit = time_limit
+
+                x0, s0, c0 = _add_sqrt_linearization(M, "x0", x_lo, x_hi)
+                u0 = M.addVars(n_u, lb=u_lo, ub=u_hi, name="u0")
+
+                # Linearized one-step prediction (what the linearized MPC
+                # believes x_1 will be) -- must stay in the box, exactly
+                # like the T=1 case of TwoTankFarkas's primal constraints.
+                # This restricts u0 to the set the linearized model would
+                # actually consider valid.
+                Alin, bbar = _build_Alin_bbar(c0, s0)
+                for j in range(n_x):
+                    x1_lin_j = (x0[j]
+                                + dt * gp.quicksum(Alin[j][k] * x0[k] for k in range(n_x))
+                                + dt * gp.quicksum(B_MAT[j, k] * u0[k] for k in range(n_u))
+                                + dt * bbar[j])
+                    M.addConstr(x1_lin_j <= x_hi[j], name=f"linfeas_hi_{j}")
+                    M.addConstr(x1_lin_j >= x_lo[j], name=f"linfeas_lo_{j}")
+
+                # True (exact, nonlinear) one-step successor: uses s0
+                # directly -- s0 == sqrt(2 g x0) exactly via the quadratic
+                # constraint, no tangent-line approximation involved.
+                x1_true = [
+                    x0[0] + dt * (-A_OUT[0] / A_AREA[0] * s0[0]
+                                  + A_OUT[1] / A_AREA[0] * s0[1]
+                                  + B_MAT[0, 0] * u0[0]),
+                    x0[1] + dt * (-A_OUT[1] / A_AREA[1] * s0[1]
+                                  + B_MAT[1, 1] * u0[1]),
+                ]
+
+                M.setObjective(x1_true[i], sense)
+                M.optimize()
+                self.models[(i, sense_name)] = M
+
+    def solution_dict(self):
+        out = {}
+        for i in range(2):
+            hi_M, lo_M = self.models[(i, 'max')], self.models[(i, 'min')]
+            out[i] = {
+                'max': hi_M.ObjVal if hi_M.SolCount else None,
+                'min': lo_M.ObjVal if lo_M.SolCount else None,
+                'max_status': hi_M.Status, 'min_status': lo_M.Status,
+            }
+        return out
+
+    def is_robust(self, tol=1e-6):
+        """None if either sub-solve failed to produce a bound, else True/False."""
+        sol = self.solution_dict()
+        robust = True
+        for i, bounds in sol.items():
+            if bounds['max'] is None or bounds['min'] is None:
+                return None
+            if bounds['max'] > self.x_hi[i] + tol or bounds['min'] < self.x_lo[i] - tol:
+                robust = False
+        return robust
 
 
 # ---------------------------------------------------------------------------
