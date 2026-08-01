@@ -98,6 +98,7 @@ def run(cfg):
     feas_tol = cfg.feas_tol
     time_limit = cfg.time_limit
     dual_bound = getattr(cfg, 'dual_bound', 50.0)
+    bound_tighten_time = getattr(cfg, 'bound_tighten_time', None)
     x0_nominal = np.array(cfg.x0_nominal) if getattr(cfg, 'x0_nominal', None) is not None \
         else 0.5 * (X_LO + X_HI)
 
@@ -115,8 +116,9 @@ def run(cfg):
         u_lo, u_hi = _u_box(u_range)
         for ti, T in enumerate(T_vals):
             ver = TwoTankFarkas(T=T, u_lo=u_lo, u_hi=u_hi, dt=dt,
-                                 dual_bound=dual_bound, verbose=False,
-                                 time_limit=time_limit)
+                                 dual_bound=dual_bound, feas_tol=feas_tol,
+                                 bound_tighten_time=bound_tighten_time,
+                                 verbose=False, time_limit=time_limit)
             status, elapsed = ver.solve()
             sol = ver.solution_dict()
             obj = sol['farkas_obj']
@@ -231,6 +233,55 @@ def _build_Alin_bbar(c, s):
     return Alin, bbar
 
 
+def _tighten_var_bounds(M, varlist, time_limit_per_var, verbose=False):
+    """
+    Optimization-based bound tightening (OBBT).
+
+    For each variable in varlist, solve min v and max v subject to the
+    model's *actual* constraints (everything already added to M, including
+    the obj_floor constraint), each capped at time_limit_per_var. Gurobi's
+    ObjBound is a mathematically valid bound on the true min/max even if
+    the sub-solve doesn't converge within that time, so it's always safe
+    to use -- it just may be looser than the true optimum for a very
+    small time budget. Bounds are only ever tightened, never loosened.
+
+    This directly targets the variables that participate in the model's
+    bilinear terms (xbar*y_ic, c*y, s*y): tighter bounds on those shrink
+    the McCormick relaxation Gurobi's spatial branch-and-bound builds
+    internally, which is what actually determines solve speed near the
+    feasible/infeasible crossover -- much more principled than guessing a
+    single global dual_bound.
+    """
+    orig_obj = M.getObjective()
+    orig_sense = M.ModelSense
+    orig_time_limit = M.Params.TimeLimit
+    orig_best_obj_stop = M.Params.BestObjStop
+    orig_best_bd_stop = M.Params.BestBdStop
+
+    M.Params.TimeLimit = time_limit_per_var
+    M.Params.BestObjStop = -GRB.INFINITY   # disabled -- these thresholds only
+    M.Params.BestBdStop = GRB.INFINITY     # make sense for the *final* objective
+
+    for v in varlist:
+        M.setObjective(v, GRB.MINIMIZE)
+        M.optimize()
+        if M.SolCount > 0 and np.isfinite(M.ObjBound) and M.ObjBound > v.LB:
+            v.LB = min(M.ObjBound, v.UB)
+
+        M.setObjective(v, GRB.MAXIMIZE)
+        M.optimize()
+        if M.SolCount > 0 and np.isfinite(M.ObjBound) and M.ObjBound < v.UB:
+            v.UB = max(M.ObjBound, v.LB)
+
+        if verbose:
+            print(f"  OBBT tightened {v.VarName}: [{v.LB:.4f}, {v.UB:.4f}]")
+
+    M.Params.TimeLimit = orig_time_limit
+    M.Params.BestObjStop = orig_best_obj_stop
+    M.Params.BestBdStop = orig_best_bd_stop
+    M.setObjective(orig_obj, orig_sense)
+
+
 def _numeric_Mmat_bbar(xbar, dt):
     """Evaluate the linearized discrete-time dynamics x_{t+1} = Mmat x_t + dt*B u_t
     + dt*bbar at a concrete (numeric) linearization point xbar."""
@@ -274,7 +325,8 @@ class TwoTankFarkas:
     """
 
     def __init__(self, T, x_lo=X_LO, x_hi=X_HI, u_lo=None, u_hi=None, dt=1.0,
-                 dual_bound=50.0, verbose=True, time_limit=None):
+                 dual_bound=50.0, feas_tol=1e-4, bound_tighten_time=None,
+                 verbose=True, time_limit=None):
         n_x, n_u = 2, 2
         self.T = T
         if u_lo is None or u_hi is None:
@@ -283,9 +335,7 @@ class TwoTankFarkas:
         M = gp.Model("two_tank_farkas")
         M.Params.OutputFlag = 1 if verbose else 0
         # M.Params.NonConvex = 2
-        M.Params.FeasibilityTol = 1e-7
-        if time_limit is not None:
-            M.Params.TimeLimit = time_limit
+        M.Params.FeasibilityTol = 1e-9
         self.model = M
 
         xbar, s, c = _add_sqrt_linearization(M, "lin", x_lo, x_hi)
@@ -340,6 +390,29 @@ class TwoTankFarkas:
                             for t in range(T) for k in range(n_u))
 
         M.addConstr(obj >= -1.0, name="obj_floor")
+
+        # Optimization-based bound tightening on the dual variables that
+        # actually appear in bilinear terms (xbar*y_ic, c*y via Mmat,
+        # s*y via bbar) -- y_ic, y. s_up/s_lo/su_up/su_lo and xbar/s/c
+        # never need it: the box duals only ever appear linearly, and
+        # xbar/s/c already have exact analytic bounds from the state box.
+        if bound_tighten_time is not None and bound_tighten_time > 0:
+            tighten_vars = [y_ic[i] for i in range(n_x)]
+            tighten_vars += [y[t][i] for t in range(T) for i in range(n_x)]
+            _tighten_var_bounds(M, tighten_vars, bound_tighten_time, verbose=verbose)
+
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        # We only need to know which side of -feas_tol the true minimum
+        # falls on, not its exact value -- closing the B&B gap all the way
+        # to the true optimum (0 or -1) is what was causing timeouts near
+        # the feasible/infeasible crossover. BestObjStop lets Gurobi stop
+        # the instant it finds *any* incumbent <= -feas_tol (an
+        # infeasibility witness -- no need to also prove it's the worst
+        # one). BestBdStop lets it stop the instant the best bound rises
+        # to >= -feas_tol (proves feasibility -- no need to close in on 0).
+        M.Params.BestObjStop = -feas_tol
+        M.Params.BestBdStop = -feas_tol
         M.setObjective(obj, GRB.MINIMIZE)
 
         self.xbar, self.s, self.c = xbar, s, c
