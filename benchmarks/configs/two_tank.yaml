@@ -7,4 +7,5 @@ feas_tol: 1.0e-4
 time_limit: 1000
 dual_bound: .1 #50.0  # initial (pre-tightening) box on the Farkas dual variables y_ic, y
 bound_tighten_time: 1.0  # per-variable OBBT time budget (seconds); null/0 disables OBBT
+recfeas_r: 0.1  # control cost weight for the KKT-optimal MPC law used by the recursive-feasibility check
 x0_nominal: null  # null -> use the center of the box constraints

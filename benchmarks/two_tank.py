@@ -112,6 +112,7 @@ def run(cfg):
     time_limit = cfg.time_limit
     dual_bound = getattr(cfg, 'dual_bound', 50.0)
     bound_tighten_time = getattr(cfg, 'bound_tighten_time', None)
+    recfeas_r = getattr(cfg, 'recfeas_r', 0.1)
     x0_nominal = np.array(cfg.x0_nominal) if getattr(cfg, 'x0_nominal', None) is not None \
         else 0.5 * (X_LO + X_HI)
 
@@ -125,7 +126,6 @@ def run(cfg):
     # u_range -> certified feasible.
     # -----------------------------------------------------------------
     farkas_obj = np.zeros((len(u_range_vals), len(T_vals)))
-    linerr_checked = set()   # linearization-error check is T-independent; run once per u_range
     for ri, u_range in enumerate(u_range_vals):
         u_lo, u_hi = _u_box(u_range)
         for ti, T in enumerate(T_vals):
@@ -151,26 +151,28 @@ def run(cfg):
             farkas_obj[ri, ti] = obj if obj is not None else float('nan')
 
             # ---------------------------------------------------------
-            # The linearized certificate above says nothing about the
-            # *true* nonlinear successor -- verify separately that
-            # trusting the linearized model's u_0 choice can't itself
-            # push x_1 = f_true(x_0, u_0) out of the box.
+            # The Farkas certificate above only proves a linearized-
+            # feasible control sequence *exists* -- it says nothing about
+            # what the actual MPC law (the KKT-optimal u_0(x_0) of the
+            # linearized-at-x_0 QP) does to the *true* nonlinear plant.
+            # Check recursive feasibility of that closed loop instead.
             # ---------------------------------------------------------
-            if certified and u_range not in linerr_checked:
-                linerr_checked.add(u_range)
-                chk = TwoTankLinearizationErrorCheck(
-                    u_lo=u_lo, u_hi=u_hi, dt=dt, verbose=False, time_limit=time_limit)
-                lin_sol = chk.solution_dict()
-                robust = chk.is_robust()
-                print(f"  [linearization-error check] u_range={u_range}:")
-                for i in range(2):
-                    b = lin_sol[i]
-                    print(f"    x1_true[{i}] range = [{b['min']}, {b['max']}]  "
-                          f"vs box [{X_LO[i]}, {X_HI[i]}]")
-                verdict = {True: 'ROBUST (true dynamics stay in box)',
-                           False: 'NOT ROBUST -- linearization error can leave the box',
-                           None: 'INCONCLUSIVE (a sub-solve did not return a bound)'}[robust]
-                print(f"    -> {verdict}")
+            if certified:
+                chk = TwoTankRecursiveFeasibilityCheck(
+                    T=T, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
+                    verbose=False, time_limit=time_limit)
+                robust, violation = chk.is_robust()
+                print(f"  [recursive-feasibility check] u_range={u_range}, T={T}:")
+                if robust is None:
+                    print("    -> INCONCLUSIVE (a sub-solve did not return a bound)")
+                elif robust:
+                    print("    -> ROBUST (the KKT-optimal u_0(x_0) always keeps the true "
+                          "successor in the box)")
+                else:
+                    i_v, side, val = violation
+                    bound = X_HI[i_v] if side == 'max' else X_LO[i_v]
+                    print(f"    -> NOT ROBUST: true x_1[{i_v}] can reach {val:.4f} "
+                          f"({side}), outside box bound {bound}")
 
     # -----------------------------------------------------------------
     # Nominal MPC cost: a plain convex QP (linearized once at a *fixed*
@@ -481,91 +483,153 @@ class TwoTankFarkas:
 
 
 # ---------------------------------------------------------------------------
-# Linearization-error check
+# Recursive-feasibility check via the KKT-optimal MPC law
 #
-# TwoTankFarkas only proves that the *linearized* one-step model has a
-# feasible u_0 for every x_0 in the box -- it says nothing about the
-# *true* nonlinear successor. This checks, over every x_0 in the box and
-# every u_0 the linearized model would accept (u_0 in the control box AND
-# the linearized prediction x_1_lin stays in the box), whether the true
-# successor x_1_true = f_true(x_0, u_0) can still leave the box. This is
-# a single-step check (T-independent): for each state component i,
-# maximize and minimize (x_1_true)_i over that same feasible set. If both
-# extremes stay inside [x_lo, x_hi] for every i, trusting the linearized
-# model's u_0 choice is safe up to the box; if either extreme escapes,
-# the linearization error alone is enough to violate the box regardless
-# of what the T-horizon certificate said.
+# At a free x_0 in the box, build the convex QP that results from
+# linearizing the dynamics *once*, at x_0 itself, and using that fixed
+# (Alin, bbar) for the whole T-step prediction:
+#
+#     min  0.5*( sum_{t=1}^T (x_t-xs)'Q(x_t-xs) + sum_{t=0}^{T-1}(u_t-us)'R(u_t-us) )
+#     s.t. x_{t+1} = Mmat(x_0) x_t + dt B u_t + dt bbar(x_0),  t = 0..T-1
+#          x_lo <= x_t <= x_hi,  t = 1..T
+#          u_lo <= u_t <= u_hi,  t = 0..T-1
+#
+# This QP is convex, so its KKT conditions (stationarity, costate
+# recursion, complementarity -- encoded here directly as bilinear
+# equalities, the same style as bilinear_recursive_feas.py's
+# _add_scp_chain, rather than Big-M) are necessary *and* sufficient:
+# solving them pins down the unique optimal u_0(x_0), the action a
+# receding-horizon MPC controller linearizing at the current state would
+# actually apply.
+#
+# We then ask whether the *true* nonlinear successor
+# f_true(x_0, u_0(x_0)) can leave the box, by maximizing/minimizing it
+# over x_0 in the box (subject to the whole KKT system). This is a
+# single-step check; if it holds for every x_0 in the box, the standard
+# recursive argument applies -- the same check at the (now known
+# in-box) successor state re-establishes the property one step further,
+# so the receding-horizon closed loop never leaves the box.
 # ---------------------------------------------------------------------------
 
-class TwoTankLinearizationErrorCheck:
-    def __init__(self, x_lo=X_LO, x_hi=X_HI, u_lo=None, u_hi=None, dt=1.0,
-                 verbose=False, time_limit=None):
+class TwoTankRecursiveFeasibilityCheck:
+    def __init__(self, T, x_lo=X_LO, x_hi=X_HI, u_lo=None, u_hi=None, dt=1.0,
+                 r=0.1, verbose=False, time_limit=None):
         n_x, n_u = 2, 2
         if u_lo is None or u_hi is None:
             u_lo, u_hi = _u_box(0.0)
+        self.T = T
         self.x_lo, self.x_hi = x_lo, x_hi
-        self.models = {}
 
+        Q = np.eye(n_x)
+        R = r * np.eye(n_u)
+
+        M = gp.Model("two_tank_recfeas")
+        M.Params.OutputFlag = 1 if verbose else 0
+        M.Params.FeasibilityTol = 1e-7
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        self.model = M
+
+        # x_0 is free in the box, and also *is* the linearization point.
+        x0, s0, c0 = _add_sqrt_linearization(M, "x0", x_lo, x_hi)
+        Alin, bbar = _build_Alin_bbar(c0, s0)
+        Mmat = [[(1.0 if i == j else 0.0) + dt * Alin[i][j] for j in range(n_x)]
+                for i in range(n_x)]
+
+        u = {t: M.addVars(n_u, lb=u_lo, ub=u_hi, name=f"u_{t}") for t in range(T)}
+        x = {0: x0}
+        for t in range(1, T + 1):
+            x[t] = M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_{t}")
+
+        for t in range(T):
+            for i in range(n_x):
+                M.addConstr(
+                    x[t + 1][i] ==
+                    gp.quicksum(Mmat[i][j] * x[t][j] for j in range(n_x))
+                    + dt * gp.quicksum(B_MAT[i, k] * u[t][k] for k in range(n_u))
+                    + dt * bbar[i],
+                    name=f"dyn_{t}_{i}")
+
+        # KKT multipliers: costate (free), and bilinear complementarity
+        # duals (>= 0) for the state box (t=1..T) and control box (t=0..T-1).
+        lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lam_{t}") for t in range(1, T + 1)}
+        xi_up = {t: M.addVars(n_x, lb=0.0, name=f"xiup_{t}") for t in range(1, T + 1)}
+        xi_lo = {t: M.addVars(n_x, lb=0.0, name=f"xilo_{t}") for t in range(1, T + 1)}
+        mu_up = {t: M.addVars(n_u, lb=0.0, name=f"muup_{t}") for t in range(T)}
+        mu_lo = {t: M.addVars(n_u, lb=0.0, name=f"mulo_{t}") for t in range(T)}
+
+        # Terminal costate.
+        for i in range(n_x):
+            M.addConstr(
+                lam[T][i] == Q[i, i] * (x[T][i] - XS[i]) + xi_up[T][i] - xi_lo[T][i],
+                name=f"termcs_{i}")
+
+        # Backward costate recursion, t = T-1 .. 1 (bilinear: Mmat depends on c0).
+        for t in range(T - 1, 0, -1):
+            for i in range(n_x):
+                M.addConstr(
+                    lam[t][i] == Q[i, i] * (x[t][i] - XS[i])
+                    + gp.quicksum(Mmat[j][i] * lam[t + 1][j] for j in range(n_x))
+                    + xi_up[t][i] - xi_lo[t][i],
+                    name=f"cs_{t}_{i}")
+
+        # Stationarity w.r.t. u_t, t = 0..T-1.
+        for t in range(T):
+            for i in range(n_u):
+                M.addConstr(
+                    R[i, i] * (u[t][i] - US[i])
+                    + dt * gp.quicksum(B_MAT[j, i] * lam[t + 1][j] for j in range(n_x))
+                    + mu_up[t][i] - mu_lo[t][i] == 0,
+                    name=f"stat_u_{t}_{i}")
+
+        # Complementarity (bilinear equalities, no Big-M -- consistent with
+        # this file's NonConvex=2 QCQP style throughout).
+        for t in range(1, T + 1):
+            for i in range(n_x):
+                M.addConstr(xi_up[t][i] * (x_hi[i] - x[t][i]) == 0, name=f"cup_x_{t}_{i}")
+                M.addConstr(xi_lo[t][i] * (x[t][i] - x_lo[i]) == 0, name=f"clo_x_{t}_{i}")
+        for t in range(T):
+            for i in range(n_u):
+                M.addConstr(mu_up[t][i] * (u_hi[i] - u[t][i]) == 0, name=f"cup_u_{t}_{i}")
+                M.addConstr(mu_lo[t][i] * (u[t][i] - u_lo[i]) == 0, name=f"clo_u_{t}_{i}")
+
+        # True (exact, nonlinear) one-step successor under u_0(x_0), computed
+        # independently of the QP's own x_1 -- via s0 directly, no
+        # tangent-line approximation (the true dynamics don't need one).
+        x1_true = [
+            x0[0] + dt * (-A_OUT[0] / A_AREA[0] * s0[0] + A_OUT[1] / A_AREA[0] * s0[1]
+                          + B_MAT[0, 0] * u[0][0]),
+            x0[1] + dt * (-A_OUT[1] / A_AREA[1] * s0[1] + B_MAT[1, 1] * u[0][1]),
+        ]
+
+        self.x0, self.u, self.x, self.x1_true = x0, u, x, x1_true
+
+        self.results = {}
         for i in range(n_x):
             for sense_name, sense in [('max', GRB.MAXIMIZE), ('min', GRB.MINIMIZE)]:
-                M = gp.Model(f"two_tank_linerr_{i}_{sense_name}")
-                M.Params.OutputFlag = 1 if verbose else 0
-                if time_limit is not None:
-                    M.Params.TimeLimit = time_limit
-
-                x0, s0, c0 = _add_sqrt_linearization(M, "x0", x_lo, x_hi)
-                u0 = M.addVars(n_u, lb=u_lo, ub=u_hi, name="u0")
-
-                # Linearized one-step prediction (what the linearized MPC
-                # believes x_1 will be) -- must stay in the box, exactly
-                # like the T=1 case of TwoTankFarkas's primal constraints.
-                # This restricts u0 to the set the linearized model would
-                # actually consider valid.
-                Alin, bbar = _build_Alin_bbar(c0, s0)
-                for j in range(n_x):
-                    x1_lin_j = (x0[j]
-                                + dt * gp.quicksum(Alin[j][k] * x0[k] for k in range(n_x))
-                                + dt * gp.quicksum(B_MAT[j, k] * u0[k] for k in range(n_u))
-                                + dt * bbar[j])
-                    M.addConstr(x1_lin_j <= x_hi[j], name=f"linfeas_hi_{j}")
-                    M.addConstr(x1_lin_j >= x_lo[j], name=f"linfeas_lo_{j}")
-
-                # True (exact, nonlinear) one-step successor: uses s0
-                # directly -- s0 == sqrt(2 g x0) exactly via the quadratic
-                # constraint, no tangent-line approximation involved.
-                x1_true = [
-                    x0[0] + dt * (-A_OUT[0] / A_AREA[0] * s0[0]
-                                  + A_OUT[1] / A_AREA[0] * s0[1]
-                                  + B_MAT[0, 0] * u0[0]),
-                    x0[1] + dt * (-A_OUT[1] / A_AREA[1] * s0[1]
-                                  + B_MAT[1, 1] * u0[1]),
-                ]
-
                 M.setObjective(x1_true[i], sense)
                 M.optimize()
-                self.models[(i, sense_name)] = M
+                val = M.ObjVal if M.SolCount else None
+                self.results[(i, sense_name)] = {'val': val, 'status': M.Status}
+                if verbose:
+                    print(f"  recfeas T={T} i={i} {sense_name}: {val}")
 
     def solution_dict(self):
-        out = {}
-        for i in range(2):
-            hi_M, lo_M = self.models[(i, 'max')], self.models[(i, 'min')]
-            out[i] = {
-                'max': hi_M.ObjVal if hi_M.SolCount else None,
-                'min': lo_M.ObjVal if lo_M.SolCount else None,
-                'max_status': hi_M.Status, 'min_status': lo_M.Status,
-            }
-        return out
+        return self.results
 
-    def is_robust(self, tol=1e-6):
-        """None if either sub-solve failed to produce a bound, else True/False."""
-        sol = self.solution_dict()
-        robust = True
-        for i, bounds in sol.items():
-            if bounds['max'] is None or bounds['min'] is None:
-                return None
-            if bounds['max'] > self.x_hi[i] + tol or bounds['min'] < self.x_lo[i] - tol:
-                robust = False
-        return robust
+    def is_robust(self, tol=1e-4):
+        """None if any sub-solve failed to produce a bound, else True/False.
+        Also returns the first violation found (i, side, value), if any."""
+        for i in range(2):
+            hi = self.results[(i, 'max')]['val']
+            lo = self.results[(i, 'min')]['val']
+            if hi is None or lo is None:
+                return None, None
+            if hi > self.x_hi[i] + tol:
+                return False, (i, 'max', hi)
+            if lo < self.x_lo[i] - tol:
+                return False, (i, 'min', lo)
+        return True, None
 
 
 # ---------------------------------------------------------------------------
