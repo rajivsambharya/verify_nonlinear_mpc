@@ -70,11 +70,12 @@ US = np.array([
 # tanks can't sustain the setpoint and drift out of the box; the window
 # has to widen enough to let u climb back up (not all the way to US
 # itself -- somewhere in between suffices) before it's feasible again.
-U_ANCHOR = 0.5 * US
+# U_ANCHOR = 0.5 * US
+U_ANCHOR = US
 
 # Box constraints on the states: a symmetric +/- Z_DIFF tolerance around
 # the setpoint.
-Z_DIFF = 10.0
+Z_DIFF = 5.0
 ZMIN = np.array([-Z_DIFF, -Z_DIFF])
 ZMAX = np.array([Z_DIFF, Z_DIFF])
 X_LO = XS + ZMIN
@@ -103,9 +104,23 @@ def _u_box(u_range):
     return u_lo, u_hi
 
 
+def _x_box(z_diff, floor=0.1):
+    """Symmetric state box +/- z_diff around the setpoint XS, matching the
+    module-level Z_DIFF/X_LO/X_HI default. Clipped at `floor` (a small
+    positive level, not 0) so sqrt(2 g x) stays well away from the
+    singular slope at x=0 regardless of how large z_diff is swept."""
+    z_diff = np.asarray(z_diff, dtype=float)
+    if z_diff.ndim == 0:
+        z_diff = np.full(2, float(z_diff))
+    x_lo = np.maximum(floor, XS - z_diff)
+    x_hi = XS + z_diff
+    return x_lo, x_hi
+
+
 def run(cfg):
     T_vals = list(cfg.T_vals)
     u_range_vals = list(cfg.u_range_vals)
+    z_diff_vals = list(cfg.z_diff_vals)
     r_vals = list(cfg.r_vals)
     dt = cfg.dt
     feas_tol = cfg.feas_tol
@@ -117,62 +132,67 @@ def run(cfg):
         else 0.5 * (X_LO + X_HI)
 
     # -----------------------------------------------------------------
-    # Feasibility certificate over a (u_range, T) grid: for each control
-    # range, search over xbar in [X_LO, X_HI] for a Farkas certificate
-    # that the T-horizon linearized MPC QP is infeasible. Because B is
-    # invertible here, feasibility is monotone non-decreasing in u_range
-    # (a wider control range can only relax the problem), so we expect a
-    # clean crossover: small u_range -> counterexample found, large
-    # u_range -> certified feasible.
+    # Feasibility certificate over a (Z_DIFF, u_range, T) grid: for each
+    # state-box half-width and control range, search over xbar in
+    # [x_lo, x_hi] for a Farkas certificate that the T-horizon linearized
+    # MPC QP is infeasible. Because B is invertible here, feasibility is
+    # monotone non-decreasing in u_range (wider control range can only
+    # relax the problem) and non-increasing in Z_DIFF (a bigger box is
+    # harder to stay inside).
     # -----------------------------------------------------------------
-    farkas_obj = np.zeros((len(u_range_vals), len(T_vals)))
-    for ri, u_range in enumerate(u_range_vals):
-        u_lo, u_hi = _u_box(u_range)
-        for ti, T in enumerate(T_vals):
-            ver = TwoTankFarkas(T=T, u_lo=u_lo, u_hi=u_hi, dt=dt,
-                                 dual_bound=dual_bound, feas_tol=feas_tol,
-                                 bound_tighten_time=bound_tighten_time,
-                                 verbose=False, time_limit=time_limit)
-            status, elapsed = ver.solve()
-            sol = ver.solution_dict()
-            obj = sol['farkas_obj']
-            certified = obj is not None and obj >= -feas_tol
-            tag = 'CERTIFIED FEASIBLE' if certified else f'INFEASIBLE COUNTEREXAMPLE (obj={obj})'
-            print(f"u_range={u_range} (u in [{u_lo}, {u_hi}]), T={T}: "
-                  f"farkas_obj={obj}  status={status}  time={elapsed:.3f}s  -> {tag}")
-            if not certified and sol.get('xbar') is not None:
-                xbar = sol['xbar']
-                xbar_vec = [xbar[i] for i in range(2)]
-                print(f"  counterexample initial state x0: "
-                      f"[{xbar_vec[0]:.4f}, {xbar_vec[1]:.4f}] cm")
-                Mmat_ce, bbar_ce = _numeric_Mmat_bbar(xbar_vec, dt)
-                print(f"  Mmat at counterexample:\n{Mmat_ce}")
-                print(f"  bbar at counterexample: {bbar_ce}")
-            farkas_obj[ri, ti] = obj if obj is not None else float('nan')
+    farkas_obj = np.zeros((len(z_diff_vals), len(u_range_vals), len(T_vals)))
+    guaranteed = np.zeros((len(z_diff_vals), len(u_range_vals), len(T_vals)), dtype=bool)
+    for zi, z_diff in enumerate(z_diff_vals):
+        x_lo, x_hi = _x_box(z_diff)
+        for ri, u_range in enumerate(u_range_vals):
+            u_lo, u_hi = _u_box(u_range)
+            for ti, T in enumerate(T_vals):
+                ver = TwoTankFarkas(T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt,
+                                     dual_bound=dual_bound, feas_tol=feas_tol,
+                                     bound_tighten_time=bound_tighten_time,
+                                     verbose=False, time_limit=time_limit)
+                status, elapsed = ver.solve()
+                sol = ver.solution_dict()
+                obj = sol['farkas_obj']
+                certified = obj is not None and obj >= -feas_tol
+                guaranteed[zi, ri, ti] = certified
+                tag = 'CERTIFIED FEASIBLE' if certified else f'INFEASIBLE COUNTEREXAMPLE (obj={obj})'
+                print(f"Z_DIFF={z_diff} (x in [{x_lo}, {x_hi}]), u_range={u_range} "
+                      f"(u in [{u_lo}, {u_hi}]), T={T}: "
+                      f"farkas_obj={obj}  status={status}  time={elapsed:.3f}s  -> {tag}")
+                if not certified and sol.get('xbar') is not None:
+                    xbar = sol['xbar']
+                    xbar_vec = [xbar[i] for i in range(2)]
+                    print(f"  counterexample initial state x0: "
+                          f"[{xbar_vec[0]:.4f}, {xbar_vec[1]:.4f}] cm")
+                    Mmat_ce, bbar_ce = _numeric_Mmat_bbar(xbar_vec, dt)
+                    print(f"  Mmat at counterexample:\n{Mmat_ce}")
+                    print(f"  bbar at counterexample: {bbar_ce}")
+                farkas_obj[zi, ri, ti] = obj if obj is not None else float('nan')
 
-            # ---------------------------------------------------------
-            # The Farkas certificate above only proves a linearized-
-            # feasible control sequence *exists* -- it says nothing about
-            # what the actual MPC law (the KKT-optimal u_0(x_0) of the
-            # linearized-at-x_0 QP) does to the *true* nonlinear plant.
-            # Check recursive feasibility of that closed loop instead.
-            # ---------------------------------------------------------
-            if certified:
-                chk = TwoTankRecursiveFeasibilityCheck(
-                    T=T, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
-                    verbose=False, time_limit=time_limit)
-                robust, violation = chk.is_robust()
-                print(f"  [recursive-feasibility check] u_range={u_range}, T={T}:")
-                if robust is None:
-                    print("    -> INCONCLUSIVE (a sub-solve did not return a bound)")
-                elif robust:
-                    print("    -> ROBUST (the KKT-optimal u_0(x_0) always keeps the true "
-                          "successor in the box)")
-                else:
-                    i_v, side, val = violation
-                    bound = X_HI[i_v] if side == 'max' else X_LO[i_v]
-                    print(f"    -> NOT ROBUST: true x_1[{i_v}] can reach {val:.4f} "
-                          f"({side}), outside box bound {bound}")
+                # -----------------------------------------------------
+                # The Farkas certificate above only proves a linearized-
+                # feasible control sequence *exists* -- it says nothing
+                # about what the actual MPC law (the KKT-optimal u_0(x_0)
+                # of the linearized-at-x_0 QP) does to the *true*
+                # nonlinear plant. Check recursive feasibility instead.
+                # -----------------------------------------------------
+                if certified:
+                    chk = TwoTankRecursiveFeasibilityCheck(
+                        T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
+                        verbose=False, time_limit=time_limit)
+                    robust, violation = chk.is_robust()
+                    print(f"  [recursive-feasibility check] Z_DIFF={z_diff}, u_range={u_range}, T={T}:")
+                    if robust is None:
+                        print("    -> INCONCLUSIVE (a sub-solve did not return a bound)")
+                    elif robust:
+                        print("    -> ROBUST (the KKT-optimal u_0(x_0) always keeps the true "
+                              "successor in the box)")
+                    else:
+                        i_v, side, val = violation
+                        bound = x_hi[i_v] if side == 'max' else x_lo[i_v]
+                        print(f"    -> NOT ROBUST: true x_1[{i_v}] can reach {val:.4f} "
+                              f"({side}), outside box bound {bound}")
 
     # -----------------------------------------------------------------
     # Nominal MPC cost: a plain convex QP (linearized once at a *fixed*
@@ -192,18 +212,27 @@ def run(cfg):
     # -----------------------------------------------------------------
     # Plots
     # -----------------------------------------------------------------
-    fig1, ax1 = plt.subplots(figsize=(8, 5))
+    from matplotlib.colors import ListedColormap
+    import matplotlib.patches as mpatches
+    grid_cmap = ListedColormap(['#d62728', '#1f77b4'])   # red = not guaranteed, blue = guaranteed
+    legend_handles = [mpatches.Patch(color='#1f77b4', label='feasibility guaranteed'),
+                       mpatches.Patch(color='#d62728', label='not guaranteed')]
+
     for ti, T in enumerate(T_vals):
-        ax1.plot(u_range_vals, farkas_obj[:, ti], marker=markers[ti % len(markers)],
-                  linewidth=2, color=colors[ti % len(colors)], label=f'T={T}')
-    ax1.axhline(0, color='k', linestyle='--', linewidth=1)
-    ax1.set_xlabel('control range')
-    ax1.set_ylabel('Farkas objective')
-    ax1.legend()
-    ax1.grid(True)
-    fig1.tight_layout()
-    fig1.savefig('two_tank_farkas.pdf', bbox_inches='tight')
-    plt.close(fig1)
+        fig, ax = plt.subplots(figsize=(8, 6))
+        grid = guaranteed[:, :, ti].astype(int)   # rows = Z_DIFF, cols = u_range
+        ax.imshow(grid, origin='lower', aspect='auto', cmap=grid_cmap, vmin=0, vmax=1)
+        ax.set_xticks(range(len(u_range_vals)))
+        ax.set_xticklabels(u_range_vals)
+        ax.set_yticks(range(len(z_diff_vals)))
+        ax.set_yticklabels(z_diff_vals)
+        ax.set_xlabel(r'$\Delta u$)')
+        ax.set_ylabel('Z\\_DIFF (state box half-width)')
+        # ax.set_title(f'T={T}')
+        # ax.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1.02, 0.5))
+        fig.tight_layout()
+        fig.savefig(f'two_tank_feasibility_grid_T{T}.pdf', bbox_inches='tight')
+        plt.close(fig)
 
     fig2, ax2 = plt.subplots(figsize=(8, 5))
     for ri, r in enumerate(r_vals):
@@ -211,15 +240,16 @@ def run(cfg):
                   linewidth=2, color=colors[ri % len(colors)], label=f'r={r}')
     ax2.set_xlabel('horizon $T$')
     ax2.set_ylabel('nominal MPC cost')
-    ax2.legend()
+    # ax2.legend()
     ax2.grid(True)
     fig2.tight_layout()
     fig2.savefig('two_tank_nominal_cost.pdf', bbox_inches='tight')
     plt.close(fig2)
 
     return {
-        'T_vals': T_vals, 'u_range_vals': u_range_vals, 'r_vals': r_vals,
-        'farkas_obj': farkas_obj, 'nominal_cost': nominal_cost,
+        'T_vals': T_vals, 'u_range_vals': u_range_vals, 'z_diff_vals': z_diff_vals,
+        'r_vals': r_vals, 'farkas_obj': farkas_obj, 'guaranteed': guaranteed,
+        'nominal_cost': nominal_cost,
     }
 
 
