@@ -164,6 +164,145 @@ class TwoTankTerminalFarkas:
         }
 
 
+# ---------------------------------------------------------------------------
+# Recursive-feasibility check for the zero-terminal-state MPC law
+#
+# Same idea as tt.TwoTankRecursiveFeasibilityCheck (see its docstring for
+# the full derivation): extract the KKT-optimal u_0(x_0) of the
+# linearized-at-x_0 QP, then ask whether the *true* nonlinear successor
+# f_true(x_0, u_0(x_0)) can leave the box. Here the QP additionally
+# enforces the zero terminal state constraint x_T == XS.
+#
+# Since x_T is pinned by an equality rather than boxed, two things change
+# relative to tt.TwoTankRecursiveFeasibilityCheck's KKT system:
+#   - the cost term (x_T-XS)'Q(x_T-XS) is identically zero at any
+#     feasible point (x_T = XS exactly there), so it drops out of the
+#     objective;
+#   - its gradient consequently also vanishes in the terminal-costate
+#     equation, so lam[T] is no longer *defined* by a terminal condition
+#     -- with no inequality left on x_T there is nothing left to
+#     complement either. lam[T] becomes a free variable, pinned down
+#     only implicitly by the rest of the KKT system (via the backward
+#     recursion feeding into u_{T-1}'s stationarity).
+# ---------------------------------------------------------------------------
+
+class TwoTankTerminalRecursiveFeasibilityCheck:
+    def __init__(self, T, x_lo=tt.X_LO, x_hi=tt.X_HI, u_lo=None, u_hi=None, dt=1.0,
+                 r=0.1, verbose=False, time_limit=None):
+        n_x, n_u = 2, 2
+        if u_lo is None or u_hi is None:
+            u_lo, u_hi = tt._u_box(0.0)
+        self.T = T
+        self.x_lo, self.x_hi = x_lo, x_hi
+
+        Q = np.eye(n_x)
+        R = r * np.eye(n_u)
+
+        M = gp.Model("two_tank_terminal_recfeas")
+        M.Params.OutputFlag = 1 if verbose else 0
+        M.Params.FeasibilityTol = 1e-7
+        if time_limit is not None:
+            M.Params.TimeLimit = time_limit
+        self.model = M
+
+        x0, s0, c0 = tt._add_sqrt_linearization(M, "x0", x_lo, x_hi)
+        Alin, bbar = tt._build_Alin_bbar(c0, s0)
+        Mmat = [[(1.0 if i == j else 0.0) + dt * Alin[i][j] for j in range(n_x)]
+                for i in range(n_x)]
+
+        u = {t: M.addVars(n_u, lb=u_lo, ub=u_hi, name=f"u_{t}") for t in range(T)}
+        x = {0: x0}
+        for t in range(1, T):
+            x[t] = M.addVars(n_x, lb=x_lo, ub=x_hi, name=f"x_{t}")
+        # Terminal state pinned exactly to the setpoint (zero terminal
+        # state constraint), not merely boxed.
+        x[T] = M.addVars(n_x, lb=tt.XS, ub=tt.XS, name=f"x_{T}")
+
+        for t in range(T):
+            for i in range(n_x):
+                M.addConstr(
+                    x[t + 1][i] ==
+                    gp.quicksum(Mmat[i][j] * x[t][j] for j in range(n_x))
+                    + dt * gp.quicksum(tt.B_MAT[i, k] * u[t][k] for k in range(n_u))
+                    + dt * bbar[i],
+                    name=f"dyn_{t}_{i}")
+
+        # KKT multipliers. lam[T] is free with no defining equation of its
+        # own (see docstring); xi_up/xi_lo only run t=1..T-1, since x_T
+        # has no inequality left to complement.
+        lam = {t: M.addVars(n_x, lb=-GRB.INFINITY, name=f"lam_{t}") for t in range(1, T + 1)}
+        xi_up = {t: M.addVars(n_x, lb=0.0, name=f"xiup_{t}") for t in range(1, T)}
+        xi_lo = {t: M.addVars(n_x, lb=0.0, name=f"xilo_{t}") for t in range(1, T)}
+        mu_up = {t: M.addVars(n_u, lb=0.0, name=f"muup_{t}") for t in range(T)}
+        mu_lo = {t: M.addVars(n_u, lb=0.0, name=f"mulo_{t}") for t in range(T)}
+
+        # Backward costate recursion, t = T-1 .. 1 (empty range if T == 1).
+        for t in range(T - 1, 0, -1):
+            for i in range(n_x):
+                M.addConstr(
+                    lam[t][i] == Q[i, i] * (x[t][i] - tt.XS[i])
+                    + gp.quicksum(Mmat[j][i] * lam[t + 1][j] for j in range(n_x))
+                    + xi_up[t][i] - xi_lo[t][i],
+                    name=f"cs_{t}_{i}")
+
+        # Stationarity w.r.t. u_t, t = 0..T-1.
+        for t in range(T):
+            for i in range(n_u):
+                M.addConstr(
+                    R[i, i] * (u[t][i] - tt.US[i])
+                    + dt * gp.quicksum(tt.B_MAT[j, i] * lam[t + 1][j] for j in range(n_x))
+                    + mu_up[t][i] - mu_lo[t][i] == 0,
+                    name=f"stat_u_{t}_{i}")
+
+        # Complementarity: state box only for t=1..T-1; control box as usual.
+        for t in range(1, T):
+            for i in range(n_x):
+                M.addConstr(xi_up[t][i] * (x_hi[i] - x[t][i]) == 0, name=f"cup_x_{t}_{i}")
+                M.addConstr(xi_lo[t][i] * (x[t][i] - x_lo[i]) == 0, name=f"clo_x_{t}_{i}")
+        for t in range(T):
+            for i in range(n_u):
+                M.addConstr(mu_up[t][i] * (u_hi[i] - u[t][i]) == 0, name=f"cup_u_{t}_{i}")
+                M.addConstr(mu_lo[t][i] * (u[t][i] - u_lo[i]) == 0, name=f"clo_u_{t}_{i}")
+
+        # True (exact, nonlinear) one-step successor under u_0(x_0),
+        # independent of the terminal constraint -- same as
+        # tt.TwoTankRecursiveFeasibilityCheck.
+        x1_true = [
+            x0[0] + dt * (-tt.A_OUT[0] / tt.A_AREA[0] * s0[0] + tt.A_OUT[1] / tt.A_AREA[0] * s0[1]
+                          + tt.B_MAT[0, 0] * u[0][0]),
+            x0[1] + dt * (-tt.A_OUT[1] / tt.A_AREA[1] * s0[1] + tt.B_MAT[1, 1] * u[0][1]),
+        ]
+
+        self.x0, self.u, self.x, self.x1_true = x0, u, x, x1_true
+
+        self.results = {}
+        for i in range(n_x):
+            for sense_name, sense in [('max', GRB.MAXIMIZE), ('min', GRB.MINIMIZE)]:
+                M.setObjective(x1_true[i], sense)
+                M.optimize()
+                val = M.ObjVal if M.SolCount else None
+                self.results[(i, sense_name)] = {'val': val, 'status': M.Status}
+                if verbose:
+                    print(f"  term-recfeas T={T} i={i} {sense_name}: {val}")
+
+    def solution_dict(self):
+        return self.results
+
+    def is_robust(self, tol=1e-4):
+        """None if any sub-solve failed to produce a bound, else True/False.
+        Also returns the first violation found (i, side, value), if any."""
+        for i in range(2):
+            hi = self.results[(i, 'max')]['val']
+            lo = self.results[(i, 'min')]['val']
+            if hi is None or lo is None:
+                return None, None
+            if hi > self.x_hi[i] + tol:
+                return False, (i, 'max', hi)
+            if lo < self.x_lo[i] - tol:
+                return False, (i, 'min', lo)
+        return True, None
+
+
 def run(cfg):
     T_vals = list(cfg.T_vals)
     u_range_vals = list(cfg.u_range_vals)
@@ -173,10 +312,16 @@ def run(cfg):
     time_limit = cfg.time_limit
     dual_bound = getattr(cfg, 'dual_bound', 50.0)
     bound_tighten_time = getattr(cfg, 'bound_tighten_time', None)
+    recfeas_r = getattr(cfg, 'recfeas_r', 0.0)
 
     n_z, n_u, n_T = len(z_diff_vals), len(u_range_vals), len(T_vals)
     box_obj = np.zeros((n_z, n_u, n_T))
     term_obj = np.zeros((n_z, n_u, n_T))
+    box_farkas_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
+    term_farkas_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
+    # "guaranteed" = Farkas-feasible AND the true nonlinear successor under
+    # the KKT-optimal u_0(x_0) stays in the box (see
+    # tt.TwoTankRecursiveFeasibilityCheck / TwoTankTerminalRecursiveFeasibilityCheck).
     box_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
     term_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
 
@@ -194,7 +339,7 @@ def run(cfg):
                 obj_b = ver_box.solution_dict()['farkas_obj']
                 cert_b = obj_b is not None and obj_b >= -feas_tol
                 box_obj[zi, ri, ti] = obj_b if obj_b is not None else float('nan')
-                box_guaranteed[zi, ri, ti] = cert_b
+                box_farkas_guaranteed[zi, ri, ti] = cert_b
 
                 ver_term = TwoTankTerminalFarkas(
                     T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt,
@@ -205,7 +350,7 @@ def run(cfg):
                 obj_t = ver_term.solution_dict()['farkas_obj']
                 cert_t = obj_t is not None and obj_t >= -feas_tol
                 term_obj[zi, ri, ti] = obj_t if obj_t is not None else float('nan')
-                term_guaranteed[zi, ri, ti] = cert_t
+                term_farkas_guaranteed[zi, ri, ti] = cert_t
 
                 print(f"Z_DIFF={z_diff} u_range={u_range} T={T}: "
                       f"box-terminal obj={obj_b} ({'FEASIBLE' if cert_b else 'INFEASIBLE'})   "
@@ -215,8 +360,36 @@ def run(cfg):
                     print("  ** WARNING: zero-terminal certified feasible but box-terminal was "
                           "not -- should be impossible (zero-terminal implies box-terminal), "
                           "likely a numerical artifact right at the feasibility boundary.")
-                # import pdb
-                # pdb.set_trace()
+
+                # -------------------------------------------------------
+                # A Farkas certificate only proves a linearized-feasible
+                # plan *exists* -- it says nothing about what the actual
+                # MPC law (the KKT-optimal u_0(x_0)) does to the *true*
+                # nonlinear plant. Verify that too, wherever the Farkas
+                # certificate says feasible; "guaranteed" in the grids
+                # below means both hold.
+                # -------------------------------------------------------
+                box_robust = None
+                if cert_b:
+                    chk_b = tt.TwoTankRecursiveFeasibilityCheck(
+                        T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
+                        verbose=True, time_limit=time_limit)
+                    box_robust, box_violation = chk_b.is_robust()
+                    tag = ('INCONCLUSIVE' if box_robust is None
+                           else ('ROBUST' if box_robust else f'NOT ROBUST {box_violation}'))
+                    print(f"  [box-terminal recursive-feasibility] {tag}")
+                box_guaranteed[zi, ri, ti] = cert_b and bool(box_robust)
+
+                term_robust = None
+                if cert_t:
+                    chk_t = TwoTankTerminalRecursiveFeasibilityCheck(
+                        T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
+                        verbose=True, time_limit=time_limit)
+                    term_robust, term_violation = chk_t.is_robust()
+                    tag = ('INCONCLUSIVE' if term_robust is None
+                           else ('ROBUST' if term_robust else f'NOT ROBUST {term_violation}'))
+                    print(f"  [zero-terminal recursive-feasibility] {tag}")
+                term_guaranteed[zi, ri, ti] = cert_t and bool(term_robust)
 
     # -----------------------------------------------------------------
     # Comparison grid, one per T: three categories --
@@ -306,5 +479,6 @@ def run(cfg):
     return {
         'T_vals': T_vals, 'u_range_vals': u_range_vals, 'z_diff_vals': z_diff_vals,
         'box_obj': box_obj, 'term_obj': term_obj,
+        'box_farkas_guaranteed': box_farkas_guaranteed, 'term_farkas_guaranteed': term_farkas_guaranteed,
         'box_guaranteed': box_guaranteed, 'term_guaranteed': term_guaranteed,
     }
