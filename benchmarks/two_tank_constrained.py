@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
@@ -188,7 +190,7 @@ class TwoTankTerminalFarkas:
 
 class TwoTankTerminalRecursiveFeasibilityCheck:
     def __init__(self, T, x_lo=tt.X_LO, x_hi=tt.X_HI, u_lo=None, u_hi=None, dt=1.0,
-                 r=0.1, verbose=False, time_limit=None):
+                 r=0.1, tol=1e-4, verbose=False, time_limit=None):
         n_x, n_u = 2, 2
         if u_lo is None or u_hi is None:
             u_lo, u_hi = tt._u_box(0.0)
@@ -275,32 +277,50 @@ class TwoTankTerminalRecursiveFeasibilityCheck:
 
         self.x0, self.u, self.x, self.x1_true = x0, u, x, x1_true
 
+        # Reframe as a pure feasibility question -- see
+        # tt.TwoTankRecursiveFeasibilityCheck for the full rationale:
+        # temporarily constrain x1_true[i] to violate its bound by more
+        # than tol and just ask if that's satisfiable, stopping at the
+        # first feasible point found (SolutionLimit=1) rather than
+        # computing the exact worst-case extremum.
+        M.Params.SolutionLimit = 1
+        M.setObjective(0.0)
+
         self.results = {}
         for i in range(n_x):
-            for sense_name, sense in [('max', GRB.MAXIMIZE), ('min', GRB.MINIMIZE)]:
-                M.setObjective(x1_true[i], sense)
+            for side, exceeds in [('hi', x1_true[i] - x_hi[i] - tol),
+                                   ('lo', x_lo[i] - tol - x1_true[i])]:
+                c = M.addConstr(exceeds >= 0, name=f"viol_{side}_{i}")
                 M.optimize()
-                val = M.ObjVal if M.SolCount else None
-                self.results[(i, sense_name)] = {'val': val, 'status': M.Status}
+                violated = M.SolCount > 0
+                proven_safe = M.Status == GRB.INFEASIBLE
+                val = x1_true[i].getValue() if violated else None
+                self.results[(i, side)] = {
+                    'violated': violated, 'val': val,
+                    'inconclusive': not violated and not proven_safe,
+                    'status': M.Status,
+                }
                 if verbose:
-                    print(f"  term-recfeas T={T} i={i} {sense_name}: {val}")
+                    print(f"  term-recfeas T={T} i={i} {side}: violated={violated} val={val}")
+                M.remove(c)
+                M.update()
 
     def solution_dict(self):
         return self.results
 
-    def is_robust(self, tol=1e-4):
-        """None if any sub-solve failed to produce a bound, else True/False.
-        Also returns the first violation found (i, side, value), if any."""
+    def is_robust(self):
+        """None if any sub-check was inconclusive (and none found a
+        violation), else True/False. Also returns the first violation
+        found (i, side, value), if any."""
+        inconclusive = False
         for i in range(2):
-            hi = self.results[(i, 'max')]['val']
-            lo = self.results[(i, 'min')]['val']
-            if hi is None or lo is None:
-                return None, None
-            if hi > self.x_hi[i] + tol:
-                return False, (i, 'max', hi)
-            if lo < self.x_lo[i] - tol:
-                return False, (i, 'min', lo)
-        return True, None
+            for side in ('hi', 'lo'):
+                r = self.results[(i, side)]
+                if r['violated']:
+                    return False, (i, 'max' if side == 'hi' else 'min', r['val'])
+                if r['inconclusive']:
+                    inconclusive = True
+        return (None, None) if inconclusive else (True, None)
 
 
 def run(cfg):
@@ -324,12 +344,19 @@ def run(cfg):
     # tt.TwoTankRecursiveFeasibilityCheck / TwoTankTerminalRecursiveFeasibilityCheck).
     box_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
     term_guaranteed = np.zeros((n_z, n_u, n_T), dtype=bool)
+    # Total wall-clock time to fully *verify* each cell -- the Farkas
+    # certificate solve plus (when applicable) the recursive-feasibility
+    # check -- i.e. everything needed to determine box_guaranteed /
+    # term_guaranteed for that cell.
+    box_time = np.zeros((n_z, n_u, n_T))
+    term_time = np.zeros((n_z, n_u, n_T))
 
     for zi, z_diff in enumerate(z_diff_vals):
         x_lo, x_hi = tt._x_box(z_diff)
         for ri, u_range in enumerate(u_range_vals):
             u_lo, u_hi = tt._u_box(u_range)
             for ti, T in enumerate(T_vals):
+                t0_box = time.time()
                 ver_box = tt.TwoTankFarkas(
                     T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt,
                     dual_bound=dual_bound, feas_tol=feas_tol,
@@ -341,6 +368,7 @@ def run(cfg):
                 box_obj[zi, ri, ti] = obj_b if obj_b is not None else float('nan')
                 box_farkas_guaranteed[zi, ri, ti] = cert_b
 
+                t0_term = time.time()
                 ver_term = TwoTankTerminalFarkas(
                     T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt,
                     dual_bound=dual_bound, feas_tol=feas_tol,
@@ -373,23 +401,28 @@ def run(cfg):
                 if cert_b:
                     chk_b = tt.TwoTankRecursiveFeasibilityCheck(
                         T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
-                        verbose=True, time_limit=time_limit)
+                        verbose=False, time_limit=time_limit)
                     box_robust, box_violation = chk_b.is_robust()
                     tag = ('INCONCLUSIVE' if box_robust is None
                            else ('ROBUST' if box_robust else f'NOT ROBUST {box_violation}'))
                     print(f"  [box-terminal recursive-feasibility] {tag}")
                 box_guaranteed[zi, ri, ti] = cert_b and bool(box_robust)
+                box_time[zi, ri, ti] = t0_term - t0_box   # box-terminal verification ends where term's begins
 
                 term_robust = None
                 if cert_t:
                     chk_t = TwoTankTerminalRecursiveFeasibilityCheck(
                         T=T, x_lo=x_lo, x_hi=x_hi, u_lo=u_lo, u_hi=u_hi, dt=dt, r=recfeas_r,
-                        verbose=True, time_limit=time_limit)
+                        verbose=False, time_limit=time_limit)
                     term_robust, term_violation = chk_t.is_robust()
                     tag = ('INCONCLUSIVE' if term_robust is None
                            else ('ROBUST' if term_robust else f'NOT ROBUST {term_violation}'))
                     print(f"  [zero-terminal recursive-feasibility] {tag}")
                 term_guaranteed[zi, ri, ti] = cert_t and bool(term_robust)
+                term_time[zi, ri, ti] = time.time() - t0_term
+
+                print(f"  [time to verify] box-terminal={box_time[zi, ri, ti]:.3f}s  "
+                      f"zero-terminal={term_time[zi, ri, ti]:.3f}s")
 
     # -----------------------------------------------------------------
     # Comparison grid, one per T: three categories --
@@ -476,9 +509,38 @@ def run(cfg):
         fig.savefig(f'two_tank_constrained_side_by_side_zdiff{z_diff}.pdf', bbox_inches='tight')
         plt.close(fig)
 
+    # -----------------------------------------------------------------
+    # Same side-by-side layout, but colored by time-to-verify (seconds)
+    # instead of feasible/infeasible: a continuous colormap with a shared
+    # colorbar (both subplots use the same scale, so they're directly
+    # comparable), no legend.
+    # -----------------------------------------------------------------
+    for zi, z_diff in enumerate(z_diff_vals):
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        vmax = max(box_time[zi].max(), term_time[zi].max())
+        vmax = vmax if vmax > 0 else 1.0
+        im = None
+        for ax, arr, title, show_ylabel in [(axes[0], box_time, 'no terminal constraint', True),
+                                             (axes[1], term_time, 'terminal constraint', False)]:
+            grid = arr[zi]   # rows = u_range, cols = T
+            im = ax.imshow(grid, origin='lower', aspect='auto', cmap='viridis', vmin=0, vmax=vmax)
+            ax.set_xticks(range(len(T_vals)))
+            ax.set_xticklabels(T_vals)
+            ax.set_yticks(range(len(u_range_vals)))
+            ax.set_yticklabels(u_range_vals)
+            ax.set_xlabel(r'$T$')
+            if show_ylabel:
+                ax.set_ylabel(r'$\Delta u$')
+            ax.set_title(title)
+        # fig.colorbar(im, ax=axes, label='time to verify (s)', shrink=0.9)
+        fig.colorbar(im, ax=axes, label='solve time (seconds)', shrink=0.9)
+        fig.savefig(f'two_tank_constrained_time_side_by_side_zdiff{z_diff}.pdf', bbox_inches='tight')
+        plt.close(fig)
+
     return {
         'T_vals': T_vals, 'u_range_vals': u_range_vals, 'z_diff_vals': z_diff_vals,
         'box_obj': box_obj, 'term_obj': term_obj,
         'box_farkas_guaranteed': box_farkas_guaranteed, 'term_farkas_guaranteed': term_farkas_guaranteed,
         'box_guaranteed': box_guaranteed, 'term_guaranteed': term_guaranteed,
+        'box_time': box_time, 'term_time': term_time,
     }

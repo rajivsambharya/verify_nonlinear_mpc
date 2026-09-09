@@ -543,7 +543,7 @@ class TwoTankFarkas:
 
 class TwoTankRecursiveFeasibilityCheck:
     def __init__(self, T, x_lo=X_LO, x_hi=X_HI, u_lo=None, u_hi=None, dt=1.0,
-                 r=0.1, verbose=False, time_limit=None):
+                 r=0.1, tol=1e-4, verbose=False, time_limit=None):
         n_x, n_u = 2, 2
         if u_lo is None or u_hi is None:
             u_lo, u_hi = _u_box(0.0)
@@ -634,32 +634,55 @@ class TwoTankRecursiveFeasibilityCheck:
 
         self.x0, self.u, self.x, self.x1_true = x0, u, x, x1_true
 
+        # Reframe "what is the worst-case x1_true[i]" as a pure
+        # feasibility question instead of an optimization: temporarily
+        # add a constraint that *forces* a violation (x1_true[i] on the
+        # wrong side of the bound by more than tol) and just ask whether
+        # that's satisfiable, with SolutionLimit=1 so Gurobi stops the
+        # instant it finds *any* feasible point. Finding a violation is
+        # then cheap (no need to also prove it's the worst one); proving
+        # robustness (infeasibility of the violation constraint) costs
+        # the same either way, since that always requires exhausting the
+        # search space regardless of whether we ask for it via a bound
+        # comparison or a direct feasibility query.
+        M.Params.SolutionLimit = 1
+        M.setObjective(0.0)
+
         self.results = {}
         for i in range(n_x):
-            for sense_name, sense in [('max', GRB.MAXIMIZE), ('min', GRB.MINIMIZE)]:
-                M.setObjective(x1_true[i], sense)
+            for side, exceeds in [('hi', x1_true[i] - x_hi[i] - tol),
+                                   ('lo', x_lo[i] - tol - x1_true[i])]:
+                c = M.addConstr(exceeds >= 0, name=f"viol_{side}_{i}")
                 M.optimize()
-                val = M.ObjVal if M.SolCount else None
-                self.results[(i, sense_name)] = {'val': val, 'status': M.Status}
+                violated = M.SolCount > 0
+                proven_safe = M.Status == GRB.INFEASIBLE
+                val = x1_true[i].getValue() if violated else None
+                self.results[(i, side)] = {
+                    'violated': violated, 'val': val,
+                    'inconclusive': not violated and not proven_safe,
+                    'status': M.Status,
+                }
                 if verbose:
-                    print(f"  recfeas T={T} i={i} {sense_name}: {val}")
+                    print(f"  recfeas T={T} i={i} {side}: violated={violated} val={val}")
+                M.remove(c)
+                M.update()
 
     def solution_dict(self):
         return self.results
 
-    def is_robust(self, tol=1e-4):
-        """None if any sub-solve failed to produce a bound, else True/False.
-        Also returns the first violation found (i, side, value), if any."""
+    def is_robust(self):
+        """None if any sub-check was inconclusive (and none found a
+        violation), else True/False. Also returns the first violation
+        found (i, side, value), if any."""
+        inconclusive = False
         for i in range(2):
-            hi = self.results[(i, 'max')]['val']
-            lo = self.results[(i, 'min')]['val']
-            if hi is None or lo is None:
-                return None, None
-            if hi > self.x_hi[i] + tol:
-                return False, (i, 'max', hi)
-            if lo < self.x_lo[i] - tol:
-                return False, (i, 'min', lo)
-        return True, None
+            for side in ('hi', 'lo'):
+                r = self.results[(i, side)]
+                if r['violated']:
+                    return False, (i, 'max' if side == 'hi' else 'min', r['val'])
+                if r['inconclusive']:
+                    inconclusive = True
+        return (None, None) if inconclusive else (True, None)
 
 
 # ---------------------------------------------------------------------------

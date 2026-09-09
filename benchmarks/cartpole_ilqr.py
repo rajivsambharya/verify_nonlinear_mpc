@@ -388,7 +388,7 @@ class CartpoleILQRPolicyVerify:
         # Initial state (x[0] in X_0)
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
         # x0 = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="x0")
-        M.addConstr(x0[0] >= 0, name="x0_lo")
+        # M.addConstr(x0[0] >= 0, name="x0_lo")
 
         # Next state x[1] (free: no state constraints)
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
@@ -426,8 +426,9 @@ class CartpoleILQRPolicyVerify:
 
         # Feasibility = policy does NOT satisfy contraction with rate rho
         eps = 1 - rho
-        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
-        # M.addConstr(V_curr >= 1e-3, name="stability")
+        # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
+        M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
+        M.addConstr(V_curr >= 1e-6, name="stability")
         # M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
         M.setObjective(0, GRB.MAXIMIZE)
 
