@@ -1,10 +1,10 @@
 j_vals: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 T_vals: [1, 2, 3, 4, 5]
-r_cost: 1 #0.001 #1e-3
+r_cost: 1 #1e-3
 feas_tol: 1.0e-4
 time_limit: 300
 x0_mins: [1.0]
-x0_maxes: [1.0] #[2.0]
+x0_maxes: [2.0] #[2.0]
 u_bound: 1.
 # Bilinear system: x+[0] = a00*x[0] + u + b*u*x[0]
 #                  x+[1] = a11*x[1] + a10*x[0]

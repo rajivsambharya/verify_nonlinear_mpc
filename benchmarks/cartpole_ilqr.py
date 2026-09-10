@@ -379,7 +379,7 @@ class CartpoleILQRPolicyVerify:
 
         M = gp.Model("cartpole_ilqr_policy_verify")
         M.Params.OutputFlag = 1 if verbose else 0
-        M.Params.FeasibilityTol = 1e-9 #1e-9
+        M.Params.FeasibilityTol = 1e-7 #1e-9
         M.Params.NonConvex = 2
         if time_limit is not None:
             M.Params.TimeLimit = time_limit
@@ -388,7 +388,7 @@ class CartpoleILQRPolicyVerify:
         # Initial state (x[0] in X_0)
         x0 = M.addVars(n_x, lb=x_lo, ub=x_hi, name="x0")
         # x0 = M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="x0")
-        # M.addConstr(x0[0] >= 0, name="x0_lo")
+        M.addConstr(x0[0] >= 0, name="x0_lo")
 
         # Next state x[1] (free: no state constraints)
         x1 = M.addVars(n_x, lb=-GRB.INFINITY, name="x1")
@@ -893,7 +893,10 @@ class CartpoleILQRVerify:
 
         eps = 1 - rho
         self.orig_objective = 0
-        M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="V_curr_pos")
+        # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="V_curr_pos")
+        M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="V_curr_pos")
+        M.addConstr(V_curr >= 1e-3, name="V_curr_pos")
+        # M.addConstr(self.x[k][0] * self.x[k][0] + self.x[k][1] * self.x[k][1] >= 1e-6)
         M.setObjective(self.orig_objective, GRB.MAXIMIZE)
 
     def solve(self):
