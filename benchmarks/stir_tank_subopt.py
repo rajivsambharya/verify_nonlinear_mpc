@@ -76,7 +76,7 @@ def run(cfg):
         obj_vals = []
         time_vals     = []
         for T in T_vals:
-            ver = StirTankVerify(T=T, r=r, e_lim=e_lim, dt=dt, verbose=True)
+            ver = StirTankVerify(T=T, r=r, e_lim=e_lim, dt=dt, verbose=False)
             status, elapsed = ver.solve()
             sol = ver.solution_dict()
             obj = sol['obj'] if sol['obj'] is not None else float('nan')
@@ -450,6 +450,14 @@ class StirTankVerify:
         v_lo = U_LO - UE
         v_hi = U_HI - UE
 
+        # Wide, fixed bounds for x1/x2 used only inside add_nl_aux, purely
+        # for numerical safety (x2 must stay bounded away from 0 since
+        # M_par/x2 and exp(-M_par/x2) appear) -- deliberately independent
+        # of e_lim so they don't reimpose the initial-state box on the
+        # (otherwise unconstrained) MPC trajectories.
+        X1_SAFE_LO, X1_SAFE_HI = 0.0, 2.0
+        X2_SAFE_LO, X2_SAFE_HI = 0.05, 2.0
+
         M = gp.Model("stir_tank_verify_nonlinear")
         M.Params.OutputFlag = 1 if verbose else 0
         M.Params.NonConvex  = 2
@@ -459,14 +467,22 @@ class StirTankVerify:
         # ---------------------------------------------------------------
         # State/control trajectory variables
         # ---------------------------------------------------------------
+        # e_lim only bounds the *actual* initial state -- the MPC problems
+        # themselves (the e_kkt/e_opt trajectories, t=1..T) are otherwise
+        # unconstrained in state, matching the fact that their KKT system
+        # below has no complementarity duals for a state box (only the
+        # control box has nu_up/nu_lo). x1/x2 below get their own wide,
+        # fixed, e_lim-independent bounds purely for numerical safety (x2
+        # must stay away from 0 since M_par/x2 and exp(-M_par/x2) appear),
+        # not to smuggle the e_lim box back in through the auxiliary vars.
         e0 = M.addVars(n_x, lb=-e_lim, ub=e_lim, name="e0")
 
-        e_kkt = {t: M.addVars(n_x, lb=-e_lim, ub=e_lim, name=f"ek_{t}")
+        e_kkt = {t: M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"ek_{t}")
                  for t in range(T + 1)}
         v_kkt = {t: M.addVars(n_u, lb=v_lo,   ub=v_hi,  name=f"vk_{t}")
                  for t in range(T)}
 
-        e_opt = {t: M.addVars(n_x, lb=-e_lim, ub=e_lim, name=f"eo_{t}")
+        e_opt = {t: M.addVars(n_x, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f"eo_{t}")
                  for t in range(T + 1)}
         v_opt = {t: M.addVars(n_u, lb=v_lo,   ub=v_hi,  name=f"vo_{t}")
                  for t in range(T)}
@@ -492,21 +508,25 @@ class StirTankVerify:
         # psi  = (v[0]+ue)    * ((e[1]+xe[1]) - xc)
         # ---------------------------------------------------------------
         def add_nl_aux(e, v, tag):
-            x1 = M.addVar(lb=XE[0]-e_lim, ub=XE[0]+e_lim, name=f"x1_{tag}")
-            x2 = M.addVar(lb=XE[1]-e_lim, ub=XE[1]+e_lim, name=f"x2_{tag}")
+            # Wide, e_lim-independent bounds: only for numerical safety
+            # (x2 must stay bounded away from 0, since M_par/x2 and
+            # exp(-M_par/x2) appear below) -- not a re-imposition of the
+            # e_lim state box on the MPC trajectory.
+            x1 = M.addVar(lb=X1_SAFE_LO, ub=X1_SAFE_HI, name=f"x1_{tag}")
+            x2 = M.addVar(lb=X2_SAFE_LO, ub=X2_SAFE_HI, name=f"x2_{tag}")
             u  = M.addVar(lb=U_LO, ub=U_HI, name=f"u_{tag}")
             M.addConstr(x1 == e[0] + XE[0])
             M.addConstr(x2 == e[1] + XE[1])
             M.addConstr(u  == v[0] + UE)
 
             # ratio = M_par / x2  (bilinear: x2 * ratio = M_par)
-            ratio = M.addVar(lb=M_par/(XE[1]+e_lim),
-                             ub=M_par/(XE[1]-e_lim), name=f"ratio_{tag}")
+            ratio = M.addVar(lb=M_par/X2_SAFE_HI,
+                             ub=M_par/X2_SAFE_LO, name=f"ratio_{tag}")
             M.addConstr(x2 * ratio == M_par)
 
             # neg_ratio = -ratio
-            neg_ratio = M.addVar(lb=-M_par/(XE[1]-e_lim),
-                                 ub=-M_par/(XE[1]+e_lim), name=f"nratio_{tag}")
+            neg_ratio = M.addVar(lb=-M_par/X2_SAFE_LO,
+                                 ub=-M_par/X2_SAFE_HI, name=f"nratio_{tag}")
             M.addConstr(neg_ratio == -ratio)
 
             # exp_term = exp(neg_ratio) = exp(-M_par/x2)

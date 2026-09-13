@@ -428,7 +428,7 @@ class CartpoleILQRPolicyVerify:
         eps = 1 - rho
         # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="stability")
         M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
-        M.addConstr(V_curr >= 1e-6, name="stability")
+        M.addConstr(V_next >= 1e-3, name="stability")
         # M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="stability")
         M.setObjective(0, GRB.MAXIMIZE)
 
@@ -895,7 +895,7 @@ class CartpoleILQRVerify:
         self.orig_objective = 0
         # M.addConstr(V_next - V_curr + eps * V_curr >= 1e-6, name="V_curr_pos")
         M.addConstr(V_next - V_curr + eps * V_curr >= 0, name="V_curr_pos")
-        M.addConstr(V_curr >= 1e-3, name="V_curr_pos")
+        M.addConstr(V_next >= 1e-3, name="V_curr_pos")
         # M.addConstr(self.x[k][0] * self.x[k][0] + self.x[k][1] * self.x[k][1] >= 1e-6)
         M.setObjective(self.orig_objective, GRB.MAXIMIZE)
 
