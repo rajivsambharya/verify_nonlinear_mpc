@@ -1,7 +1,0 @@
-T_vals: [5, 10]
-r_vals: [0.0] #, 0.01, 0.1, 1.0]
-dt: 1
-feas_tol: 1.0e-4
-time_limit: 300
-dual_bound: 1  # finite bound on the Farkas dual variables (helps NonConvex QCQP convergence)
-x0_nominal: null  # null -> use the center of the box constraints (9)
