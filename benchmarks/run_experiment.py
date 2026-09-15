@@ -4,7 +4,7 @@ import hydra
 
 import benchmarks.cartpole_ilqr as cartpole_ilqr
 import benchmarks.nonlinear_double_integrator as nonlinear_double_integrator
-import benchmarks.bilinear_closed_loop2 as bilinear_closed_loop2
+import benchmarks.bilinear_closed_loop as bilinear_closed_loop
 import benchmarks.stir_tank_subopt as stir_tank_subopt
 import benchmarks.two_tank as two_tank
 import benchmarks.two_tank_constrained as two_tank_constrained
@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use('pdf')
 
 
-@hydra.main(config_path='configs', config_name='cartpole.yaml')
+@hydra.main(config_path='configs', config_name='cartpole_ilqr.yaml')
 def main_run_cartpole_ilqr(cfg):
     cartpole_ilqr.run(cfg)
 
@@ -24,9 +24,9 @@ def main_run_nonlinear_double_integrator(cfg):
     nonlinear_double_integrator.run(cfg)
 
 
-@hydra.main(config_path='configs', config_name='bilinear_closed_loop2.yaml')
-def main_run_bilinear_closed_loop2(cfg):
-    bilinear_closed_loop2.run(cfg)
+@hydra.main(config_path='configs', config_name='bilinear_closed_loop.yaml')
+def main_run_bilinear_closed_loop(cfg):
+    bilinear_closed_loop.run(cfg)
 
 
 @hydra.main(config_path='configs', config_name='stir_tank_subopt.yaml')
@@ -57,10 +57,10 @@ if __name__ == '__main__':
         sys.argv[1] = base + 'cartpole_ilqr/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
         main_run_cartpole_ilqr()
-    elif sys.argv[1] == 'bilinear_closed_loop2':
-        sys.argv[1] = base + 'bilinear_closed_loop2/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
+    elif sys.argv[1] == 'bilinear_closed_loop':
+        sys.argv[1] = base + 'bilinear_closed_loop/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
-        main_run_bilinear_closed_loop2()
+        main_run_bilinear_closed_loop()
     elif sys.argv[1] == 'stir_tank_subopt':
         sys.argv[1] = base + 'stir_tank_subopt/train_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}'
         sys.argv = [sys.argv[0], sys.argv[1]]
